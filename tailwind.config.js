@@ -43,8 +43,7 @@ module.exports = {
         'cat-breathe': 'catBreathe 2.6s ease-in-out infinite',
         'music-float': 'musicFloat 1.6s ease-in-out infinite',
         'cat-flip': 'catFlip 0.5s linear infinite',
-        'cat-hop': 'catHop 0.55s ease-in-out infinite',
-        'cat-hop-fast': 'catHop 0.32s ease-in-out infinite',
+        'cat-jump': 'catJump 0.8s ease-in-out infinite',
       },
       keyframes: {
         slideIn: {
@@ -101,10 +100,12 @@ module.exports = {
           '0%': { transform: 'rotate(0deg)' },
           '100%': { transform: 'rotate(360deg)' },
         },
-        // Pronounced hop while roaming (visibly jumps up and lands)
-        catHop: {
-          '0%, 100%': { transform: 'translateY(0)' },
-          '45%': { transform: 'translateY(-26%)' },
+        // A jump arc: rise facing up, flip at the apex, come down facing down.
+        catJump: {
+          '0%': { transform: 'translateY(0) scaleY(1)' },
+          '40%': { transform: 'translateY(-45%) scaleY(1)' },
+          '55%': { transform: 'translateY(-45%) scaleY(-1)' },
+          '100%': { transform: 'translateY(0) scaleY(-1)' },
         },
       },
     },

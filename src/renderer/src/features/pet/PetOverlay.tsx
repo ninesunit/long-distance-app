@@ -27,10 +27,10 @@ const BOUNCE_DAMPING = 0.4;
 const MIN_BOUNCE_VELOCITY = 3;
 const GRAVITY = 0.32; // gentler, more grounded fall
 const IDLE_TIMEOUT_MS = 90000;
-const DRAG_BROADCAST_INTERVAL_MS = 50;
+const DRAG_BROADCAST_INTERVAL_MS = 66; // ~15/sec — well under Supabase's rate limit
 const WALK_DURATION_MS = 5000;
 const RUN_DURATION_MS = 1200;
-const RUN_PROBABILITY = 0.3;
+const JUMP_DURATION_MS = 1600;
 const GROOM_DURATION_MS = 1800;
 const FLING_SPEED = 20; // px/frame at release to count as a fling (vs a gentle drop)
 const AIR_FRICTION = 0.985;
@@ -53,7 +53,7 @@ export default function PetOverlay() {
   const [falling, setFalling] = useState(false);
   const [asleep, setAsleep] = useState(true);
   const [moving, setMoving] = useState(false);
-  const [isRunning, setIsRunning] = useState(false);
+  const [moveMode, setMoveMode] = useState<'walk' | 'run' | 'jump'>('walk');
   const [grooming, setGrooming] = useState(false);
   const movingTimerRef = useRef<number | null>(null);
   const groomTimeoutRef = useRef<number | null>(null);
@@ -89,6 +89,7 @@ export default function PetOverlay() {
   const catRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
   const remoteControlledRef = useRef(false);
+  const remoteTimeoutRef = useRef<number | null>(null);
   const interactiveRef = useRef(false);
   const mousePosRef = useRef({ x: -1, y: -1 });
   const dragOffset = useRef({ x: 0, y: 0 });
@@ -149,14 +150,15 @@ export default function PetOverlay() {
       if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
       if (movingTimerRef.current) clearTimeout(movingTimerRef.current);
       if (groomTimeoutRef.current) clearTimeout(groomTimeoutRef.current);
+      if (remoteTimeoutRef.current) clearTimeout(remoteTimeoutRef.current);
     };
   }, []);
 
-  // Flag the cat as moving (walk or run) for `durationMs`, so the render can
-  // pick the right sprite + animation. Movement cancels any grooming.
-  const markMoving = useCallback((durationMs: number, running: boolean) => {
+  // Flag the cat as moving (walk / run / jump) for `durationMs`, so the render
+  // can pick the right sprite + animation. Movement cancels any grooming.
+  const markMoving = useCallback((durationMs: number, mode: 'walk' | 'run' | 'jump') => {
     setGrooming(false);
-    setIsRunning(running);
+    setMoveMode(mode);
     setMoving(true);
     if (movingTimerRef.current) clearTimeout(movingTimerRef.current);
     movingTimerRef.current = window.setTimeout(() => setMoving(false), durationMs);
@@ -206,10 +208,28 @@ export default function PetOverlay() {
           remoteControlledRef.current = true;
           setRemoteControlled(true);
           setRemoteState(payload.state); // mirror the drag/fall/fling animation locally
+          // CRITICAL: keep B's full-screen overlay click-through while the
+          // partner drags, or it can lock B's entire desktop.
+          if (interactiveRef.current) {
+            interactiveRef.current = false;
+            window.api.setPetInteractive(false);
+          }
           setX(payload.x);
           setY(payload.y);
           setFacingLeft(payload.facingLeft);
+          // Watchdog: if the stream stops (partner disconnected mid-drag), don't
+          // stay stuck remote-controlled forever.
+          if (remoteTimeoutRef.current) clearTimeout(remoteTimeoutRef.current);
+          remoteTimeoutRef.current = window.setTimeout(() => {
+            remoteControlledRef.current = false;
+            setRemoteControlled(false);
+            setRemoteState(null);
+          }, 2500);
         } else if (payload.state === 'idle') {
+          if (remoteTimeoutRef.current) {
+            clearTimeout(remoteTimeoutRef.current);
+            remoteTimeoutRef.current = null;
+          }
           resetIdleTimer();
           remoteControlledRef.current = false;
           setRemoteControlled(false);
@@ -217,14 +237,19 @@ export default function PetOverlay() {
           setX(payload.x);
           setY(payload.y);
           setFacingLeft(payload.facingLeft);
-        } else if (payload.state === 'roam' || payload.state === 'run') {
-          resetIdleTimer(); // partner's cat is moving → keep ours awake + walking too
+        } else if (payload.state === 'roam' || payload.state === 'run' || payload.state === 'jump') {
+          if (remoteTimeoutRef.current) {
+            clearTimeout(remoteTimeoutRef.current);
+            remoteTimeoutRef.current = null;
+          }
+          resetIdleTimer(); // partner's cat is moving → keep ours awake + moving too
           remoteControlledRef.current = false;
           setRemoteControlled(false);
           setRemoteState(null);
           setX(payload.x);
           setFacingLeft(payload.facingLeft);
-          markMoving(payload.state === 'run' ? RUN_DURATION_MS : WALK_DURATION_MS, payload.state === 'run');
+          const mode = payload.state === 'run' ? 'run' : payload.state === 'jump' ? 'jump' : 'walk';
+          markMoving(mode === 'run' ? RUN_DURATION_MS : mode === 'jump' ? JUMP_DURATION_MS : WALK_DURATION_MS, mode);
         }
       },
       onNeedsUpdate: (payload: NeedsBroadcastPayload) => {
@@ -390,15 +415,20 @@ export default function PetOverlay() {
       return;
     }
     const maxX = window.innerWidth - catSize;
-    const willRun = Math.random() < RUN_PROBABILITY;
-    const visitPin = !willRun && pinsRef.current.length > 0 && Math.random() < 0.35;
+    // Pick a movement style: walk (amble), run (dash), or jump (hop arc).
+    const r = Math.random();
+    const mode: 'walk' | 'run' | 'jump' = r < 0.3 ? 'run' : r < 0.6 ? 'jump' : 'walk';
+    const fast = mode === 'run' || mode === 'jump';
+    const visitPin = !fast && pinsRef.current.length > 0 && Math.random() < 0.35;
+    const wireState = mode === 'walk' ? 'roam' : mode; // 'roam' | 'run' | 'jump'
+    const durationMs = mode === 'run' ? RUN_DURATION_MS : mode === 'jump' ? JUMP_DURATION_MS : WALK_DURATION_MS;
+
     setX((prev) => {
-      // Sometimes wander over to visit a pinned sticker; else run anywhere or amble.
       let nextX: number;
       if (visitPin) {
         const pin = pinsRef.current[Math.floor(Math.random() * pinsRef.current.length)];
         nextX = Math.max(0, Math.min(maxX, pin.x * window.innerWidth - catSize / 2));
-      } else if (willRun) {
+      } else if (fast) {
         nextX = Math.random() * maxX;
       } else {
         nextX = Math.max(0, Math.min(maxX, prev + (Math.random() - 0.5) * maxX * 0.6));
@@ -406,21 +436,14 @@ export default function PetOverlay() {
       const nextFacingLeft = nextX < prev;
       setFacingLeft(nextFacingLeft);
       if (profile) {
-        sendPetPosition({
-          x: nextX,
-          y: groundY,
-          facingLeft: nextFacingLeft,
-          state: willRun ? 'run' : 'roam',
-          actorId: profile.id,
-        });
+        sendPetPosition({ x: nextX, y: groundY, facingLeft: nextFacingLeft, state: wireState, actorId: profile.id });
       }
       return nextX;
     });
-    markMoving(willRun ? RUN_DURATION_MS : WALK_DURATION_MS, willRun);
+    markMoving(durationMs, mode);
     // Move, then sit/groom a while before the next outing.
-    const moveMs = willRun ? RUN_DURATION_MS : WALK_DURATION_MS;
-    const pauseMs = willRun ? 800 + Math.random() * 1500 : 1500 + Math.random() * 2500;
-    timerRef.current = window.setTimeout(roam, moveMs + pauseMs);
+    const pauseMs = fast ? 800 + Math.random() * 1500 : 1500 + Math.random() * 2500;
+    timerRef.current = window.setTimeout(roam, durationMs + pauseMs);
   }, [falling, catSize, asleep, isAuthority, profile, groundY, sendPetPosition, markMoving]);
 
   useEffect(() => {
@@ -597,7 +620,11 @@ export default function PetOverlay() {
           }
         }
 
-        if (profile) {
+        // Throttle fall/fling broadcasts (was every frame ~60/sec, which flooded
+        // Supabase and disconnected both users). Always send the final 'idle'.
+        const nowMs = Date.now();
+        if (profile && (landed || nowMs - lastDragBroadcast.current > DRAG_BROADCAST_INTERVAL_MS)) {
+          lastDragBroadcast.current = nowMs;
           sendPetPosition({
             x: xRef.current,
             y: next,
@@ -642,7 +669,7 @@ export default function PetOverlay() {
 
   const isRoamingTransition = !dragging && !falling && !remoteControlled && !asleep;
   const isPositionedAbsolute = dragging || falling || remoteControlled;
-  const moveDurationMs = isRunning ? RUN_DURATION_MS : WALK_DURATION_MS;
+  const moveDurationMs = moveMode === 'run' ? RUN_DURATION_MS : moveMode === 'jump' ? JUMP_DURATION_MS : WALK_DURATION_MS;
 
   const motion = asleep
     ? 'sleep'
@@ -653,9 +680,7 @@ export default function PetOverlay() {
     : remoteControlled && remoteState
     ? remoteState // partner is dragging/flinging → show it, not idle
     : moving
-    ? isRunning
-      ? 'run'
-      : 'walk'
+    ? moveMode // 'walk' | 'run' | 'jump'
     : grooming
     ? 'groom'
     : 'sit';
@@ -665,25 +690,30 @@ export default function PetOverlay() {
       ? './sprites/pixel_cat_sleeping.gif'
       : motion === 'drag'
       ? './sprites/pixel_cat_drag.png' // being carried
+      : motion === 'jump'
+      ? './sprites/pixel_cat_jumping.png' // jump arc uses the jumping sprite
       : motion === 'walk' || motion === 'run'
-      ? './sprites/pixel_cat_jumping.png' // hopping around
+      ? './sprites/pixel_cat.gif' // ORIGINAL sprite for walking / running
       : motion === 'groom' || motion === 'sit'
       ? './sprites/pixel_cat_sit.png'
       : './sprites/pixel_cat_jumping.png'; // fall / fling — airborne pose
 
-  const catAnim = flinging || motion === 'fling'
-    ? 'animate-cat-flip' // spinning while flung (local or mirrored from partner)
-    : motion === 'walk'
-      ? 'animate-cat-hop'
+  const catAnim =
+    flinging || motion === 'fling'
+      ? 'animate-cat-flip' // spinning while flung (local or mirrored from partner)
+      : motion === 'walk'
+      ? 'animate-cat-step'
       : motion === 'run'
-      ? 'animate-cat-hop-fast'
+      ? 'animate-cat-run' // the 0.3.0 run keyframes on the original sprite
+      : motion === 'jump'
+      ? 'animate-cat-jump' // up (facing up) then down (facing down)
       : motion === 'groom'
       ? 'animate-cat-groom'
       : motion === 'sleep'
       ? 'animate-cat-breathe'
       : '';
 
-  // Face up while hopping (natural jump pose), flip to face down while dropping.
+  // Flip to face down while dropping (jump/fling anims handle their own flips).
   const imgTransform = motion === 'fall' && !flinging ? 'scaleY(-1)' : undefined;
 
   // While a track plays, an otherwise-still cat gently bobs to the music.

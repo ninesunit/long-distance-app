@@ -53,6 +53,8 @@ export default function LampPopup() {
   const myIntensityRef = useRef(0);
 
   const [songs, setSongs] = useState<Song[]>([]);
+  const songsRef = useRef<Song[]>([]);
+  songsRef.current = songs;
   const [currentSongId, setCurrentSongId] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(0.7);
@@ -85,6 +87,11 @@ export default function LampPopup() {
       if (payload.actorId === profile?.id) return;
       setCurrentSongId(payload.songId);
       setIsPlaying(payload.isPlaying);
+      // Partner just added + started a song we don't have yet → refetch the
+      // library so it resolves and plays automatically on our side too.
+      if (payload.songId && !songsRef.current.some((s) => s.id === payload.songId) && profile?.partner_id) {
+        fetchSongs(profile.id, profile.partner_id).then(setSongs);
+      }
       if (audioRef.current && Math.abs(audioRef.current.currentTime - payload.positionSeconds) > 2) {
         audioRef.current.currentTime = payload.positionSeconds;
       }
@@ -271,7 +278,10 @@ export default function LampPopup() {
     setUploading(true);
     const song = await uploadSong(profile.id, profile.partner_id, pendingFile, uploadTitleInput.trim());
     setUploading(false);
-    if (song) setSongs((prev) => [song, ...prev]);
+    if (song) {
+      setSongs((prev) => [song, ...prev]);
+      handleSelectSong(song.id); // auto-play the new upload (syncs to the partner)
+    }
     setPendingFile(null);
     setUploadTitleInput('');
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -344,11 +354,13 @@ export default function LampPopup() {
           videoId,
           playerVars: {
             autoplay: 1,
-            controls: 1,
+            controls: 0, // hide native controls — all control goes through the app (synced)
             disablekb: 1,
+            fs: 0,
             playsinline: 1,
             modestbranding: 1,
             rel: 0,
+            iv_load_policy: 3,
             origin: window.location.origin,
           },
           events: {
@@ -508,10 +520,18 @@ export default function LampPopup() {
             {/* YouTube video (sized + visible so it actually plays). React owns
                 this container; YT replaces an imperatively-added child inside it. */}
             <div
-              ref={ytContainerRef}
-              className="w-full border-2 border-ink bg-black flex-shrink-0"
+              className="relative w-full border-2 border-ink bg-black flex-shrink-0"
               style={{ aspectRatio: '16 / 9', display: currentIsYT ? 'block' : 'none' }}
-            />
+            >
+              <div ref={ytContainerRef} className="w-full h-full" />
+              {/* Catch clicks so pausing goes through the app's synced play/pause,
+                  not YouTube's own (which wouldn't sync to the partner). */}
+              <div
+                className="absolute inset-0 cursor-pointer"
+                title="Click to play/pause"
+                onClick={togglePlayPause}
+              />
+            </div>
 
             <div className="flex items-center gap-1 w-full min-w-0">
               <select
