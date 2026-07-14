@@ -1,8 +1,8 @@
 ﻿import { BrowserWindow, screen, app, ipcMain } from 'electron';
 import path from 'path';
 import { repositionActivePopup, hideAllPopups } from './popupWindows';
+import { rendererUrl } from '../staticServer';
 
-const isDev = !app.isPackaged;
 let dockWindow: BrowserWindow | null = null;
 
 const DOCK_WIDTH = 280;
@@ -34,11 +34,7 @@ export function createDockWindow(): BrowserWindow {
 
   win.setAlwaysOnTop(true, 'screen-saver');
 
-  if (isDev) {
-    win.loadURL('http://localhost:5173/dock.html');
-  } else {
-    win.loadFile(path.join(__dirname, '../../renderer/dock.html'));
-  }
+  win.loadURL(rendererUrl('dock.html'));
 
   win.on('move', () => {
     repositionActivePopup();

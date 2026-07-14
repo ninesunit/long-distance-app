@@ -1,6 +1,6 @@
 {
   "name": "long-distance-app",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A cute real-time desktop companion app for couples",
   "main": "dist/main/index.js",
   "author": "Ninesunit",

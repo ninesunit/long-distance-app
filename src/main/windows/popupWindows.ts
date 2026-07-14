@@ -1,6 +1,7 @@
 import { BrowserWindow, app } from 'electron';
 import path from 'path';
 import { getDockWindow } from './dockWindow';
+import { rendererUrl } from '../staticServer';
 
 const isDev = !app.isPackaged;
 
@@ -47,12 +48,8 @@ function createPopup(name: PopupName): BrowserWindow {
     },
   });
 
-  if (isDev) {
-    win.loadURL(`http://localhost:5173/${name}.html`);
-    win.webContents.openDevTools({ mode: 'detach' });
-  } else {
-    win.loadFile(path.join(__dirname, `../../renderer/${name}.html`));
-  }
+  win.loadURL(rendererUrl(`${name}.html`));
+  if (isDev) win.webContents.openDevTools({ mode: 'detach' });
 
   win.on('close', (e) => {
     if (!(app as any).isQuitting) {

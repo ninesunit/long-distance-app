@@ -11,7 +11,7 @@ import {
   type PetNeeds,
 } from '../../lib/needsStore';
 import { playSound, SOUNDS } from '../../lib/sounds';
-import { playMeow, resumeCatAudio } from '../../lib/catSounds';
+import { playMeow, resumeCatAudio, playWhoosh, playThud } from '../../lib/catSounds';
 import { supabase } from '../../lib/supabaseClient';
 import { fetchPins, type Pin } from '../../lib/pinsStore';
 import type {
@@ -25,13 +25,17 @@ import type {
 const CLICK_MOVE_THRESHOLD = 5;
 const BOUNCE_DAMPING = 0.4;
 const MIN_BOUNCE_VELOCITY = 3;
-const GRAVITY = 0.6;
-const IDLE_TIMEOUT_MS = 30000;
+const GRAVITY = 0.32; // gentler, more grounded fall
+const IDLE_TIMEOUT_MS = 90000;
 const DRAG_BROADCAST_INTERVAL_MS = 50;
 const WALK_DURATION_MS = 5000;
 const RUN_DURATION_MS = 1200;
 const RUN_PROBABILITY = 0.3;
 const GROOM_DURATION_MS = 1800;
+const FLING_SPEED = 20; // px/frame at release to count as a fling (vs a gentle drop)
+const AIR_FRICTION = 0.985;
+const WALL_RESTITUTION = 0.55;
+const MAX_FLING_V = 26;
 
 export default function PetOverlay() {
   const { profile } = useAuth();
@@ -45,6 +49,7 @@ export default function PetOverlay() {
   const [noteBubble, setNoteBubble] = useState<{ sender: string; content: string } | null>(null);
   const [dragging, setDragging] = useState(false);
   const [remoteControlled, setRemoteControlled] = useState(false);
+  const [remoteState, setRemoteState] = useState<'drag' | 'fall' | 'fling' | null>(null);
   const [falling, setFalling] = useState(false);
   const [asleep, setAsleep] = useState(true);
   const [moving, setMoving] = useState(false);
@@ -57,6 +62,8 @@ export default function PetOverlay() {
   const needsRef = useRef<PetNeeds | null>(null);
   const hungryNotifiedRef = useRef(false);
   const [listening, setListening] = useState(false);
+  const listeningRef = useRef(false);
+  listeningRef.current = listening;
   const [partnerName, setPartnerName] = useState('');
   const [pins, setPins] = useState<Pin[]>([]);
   const pinsRef = useRef<Pin[]>([]);
@@ -71,6 +78,13 @@ export default function PetOverlay() {
 
   const timerRef = useRef<number | null>(null);
   const velocityRef = useRef(0);
+  const velocityXRef = useRef(0);
+  const dragVelRef = useRef({ vx: 0, vy: 0 });
+  const lastDragPosRef = useRef({ x: 0, y: 0 });
+  const flungRef = useRef(false);
+  const xRef = useRef(100);
+  xRef.current = x;
+  const [flinging, setFlinging] = useState(false);
   const fallRafRef = useRef<number | null>(null);
   const catRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
@@ -112,6 +126,11 @@ export default function PetOverlay() {
     setAsleep(false);
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     idleTimerRef.current = window.setTimeout(() => {
+      // Never fall asleep while a song is playing — keep the cat up and bopping.
+      if (listeningRef.current) {
+        resetIdleTimer();
+        return;
+      }
       if (catRef.current) {
         const rect = catRef.current.getBoundingClientRect();
         setX(rect.left);
@@ -119,6 +138,11 @@ export default function PetOverlay() {
       setAsleep(true);
     }, IDLE_TIMEOUT_MS);
   }, []);
+
+  // A song starting/stopping wakes the cat (and stops it sleeping while it plays).
+  useEffect(() => {
+    if (listening) resetIdleTimer();
+  }, [listening, resetIdleTimer]);
 
   useEffect(() => {
     return () => {
@@ -138,18 +162,25 @@ export default function PetOverlay() {
     movingTimerRef.current = window.setTimeout(() => setMoving(false), durationMs);
   }, []);
 
-  // When the cat is calm and stationary it occasionally grooms itself.
+  // When the cat is calm and stationary it OCCASIONALLY grooms itself. Kept
+  // rare so a resting cat doesn't look like it's constantly "dancing".
   useEffect(() => {
     const id = window.setInterval(() => {
       if (asleep || dragging || falling || remoteControlled || moving || grooming || treatModeRef.current) return;
-      if (Math.random() < 0.45) {
+      if (Math.random() < 0.18) {
         setGrooming(true);
         if (groomTimeoutRef.current) clearTimeout(groomTimeoutRef.current);
         groomTimeoutRef.current = window.setTimeout(() => setGrooming(false), GROOM_DURATION_MS);
       }
-    }, 3500);
+    }, 7000);
     return () => clearInterval(id);
   }, [asleep, dragging, falling, remoteControlled, moving, grooming]);
+
+  // Wake the cat on startup so it roams right away (it sleeps after IDLE_TIMEOUT
+  // of no interaction, not immediately).
+  useEffect(() => {
+    resetIdleTimer();
+  }, [resetIdleTimer]);
 
   const { sendPetInteraction, sendPetPosition, sendNeedsUpdate } = useCoupleChannel(
     profile?.id,
@@ -170,10 +201,11 @@ export default function PetOverlay() {
       onPetPosition: (payload: PetPositionPayload) => {
         if (payload.actorId === profile?.id) return;
 
-        if (payload.state === 'drag' || payload.state === 'fall') {
-          resetIdleTimer();
+        if (payload.state === 'drag' || payload.state === 'fall' || payload.state === 'fling') {
+          resetIdleTimer(); // partner is handling the cat → wake + show it
           remoteControlledRef.current = true;
           setRemoteControlled(true);
+          setRemoteState(payload.state); // mirror the drag/fall/fling animation locally
           setX(payload.x);
           setY(payload.y);
           setFacingLeft(payload.facingLeft);
@@ -181,10 +213,15 @@ export default function PetOverlay() {
           resetIdleTimer();
           remoteControlledRef.current = false;
           setRemoteControlled(false);
+          setRemoteState(null);
           setX(payload.x);
           setY(payload.y);
           setFacingLeft(payload.facingLeft);
         } else if (payload.state === 'roam' || payload.state === 'run') {
+          resetIdleTimer(); // partner's cat is moving → keep ours awake + walking too
+          remoteControlledRef.current = false;
+          setRemoteControlled(false);
+          setRemoteState(null);
           setX(payload.x);
           setFacingLeft(payload.facingLeft);
           markMoving(payload.state === 'run' ? RUN_DURATION_MS : WALK_DURATION_MS, payload.state === 'run');
@@ -382,7 +419,7 @@ export default function PetOverlay() {
     markMoving(willRun ? RUN_DURATION_MS : WALK_DURATION_MS, willRun);
     // Move, then sit/groom a while before the next outing.
     const moveMs = willRun ? RUN_DURATION_MS : WALK_DURATION_MS;
-    const pauseMs = willRun ? 1500 + Math.random() * 2500 : 3500 + Math.random() * 4000;
+    const pauseMs = willRun ? 800 + Math.random() * 1500 : 1500 + Math.random() * 2500;
     timerRef.current = window.setTimeout(roam, moveMs + pauseMs);
   }, [falling, catSize, asleep, isAuthority, profile, groundY, sendPetPosition, markMoving]);
 
@@ -435,12 +472,17 @@ export default function PetOverlay() {
 
       dragOffset.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       mouseDownPos.current = { x: e.clientX, y: e.clientY };
+      lastDragPosRef.current = { x: rect.left, y: rect.top };
+      dragVelRef.current = { vx: 0, vy: 0 };
       hasMoved.current = false;
 
       draggingRef.current = true;
       setDragging(true);
       setFalling(false);
+      setFlinging(false);
+      flungRef.current = false;
       velocityRef.current = 0;
+      velocityXRef.current = 0;
     },
     [resetIdleTimer]
   );
@@ -456,6 +498,14 @@ export default function PetOverlay() {
       }
       const nextX = Math.max(0, Math.min(window.innerWidth - catSize, e.clientX - dragOffset.current.x));
       const nextY = Math.max(0, Math.min(window.innerHeight - catSize, e.clientY - dragOffset.current.y));
+
+      // Track release velocity (px/frame) for the fling.
+      dragVelRef.current = {
+        vx: nextX - lastDragPosRef.current.x,
+        vy: nextY - lastDragPosRef.current.y,
+      };
+      lastDragPosRef.current = { x: nextX, y: nextY };
+
       setX(nextX);
       setY(nextY);
 
@@ -477,6 +527,19 @@ export default function PetOverlay() {
         sendPetInteraction({ interactionType: 'pet', actorId: profile.id, actorName: profile.display_name });
         if (y !== null) sendPetPosition({ x, y, facingLeft, state: 'idle', actorId: profile.id });
       } else {
+        // Fling if released mid-motion, otherwise just drop.
+        const { vx, vy } = dragVelRef.current;
+        if (Math.hypot(vx, vy) > FLING_SPEED) {
+          velocityRef.current = Math.max(-MAX_FLING_V, Math.min(MAX_FLING_V, vy));
+          velocityXRef.current = Math.max(-MAX_FLING_V, Math.min(MAX_FLING_V, vx));
+          flungRef.current = true;
+          setFlinging(true);
+          playWhoosh();
+        } else {
+          velocityRef.current = 0;
+          velocityXRef.current = 0;
+          flungRef.current = false;
+        }
         setFalling(true);
       }
     };
@@ -493,8 +556,26 @@ export default function PetOverlay() {
     if (!falling) return;
 
     const step = () => {
+      // Horizontal fling motion (with air friction + wall bounces).
+      if (velocityXRef.current !== 0) {
+        const maxX = window.innerWidth - catSize;
+        let nx = xRef.current + velocityXRef.current;
+        if (nx < 0) {
+          nx = 0;
+          velocityXRef.current = -velocityXRef.current * WALL_RESTITUTION;
+        } else if (nx > maxX) {
+          nx = maxX;
+          velocityXRef.current = -velocityXRef.current * WALL_RESTITUTION;
+        }
+        velocityXRef.current *= AIR_FRICTION;
+        if (Math.abs(velocityXRef.current) < 0.15) velocityXRef.current = 0;
+        xRef.current = nx;
+        setX(nx);
+      }
+
       setY((prevY) => {
         const current = prevY ?? groundY;
+        const wasFlung = flungRef.current; // capture before landing clears it
         velocityRef.current += GRAVITY;
         let next = current + velocityRef.current;
         let landed = false;
@@ -505,17 +586,23 @@ export default function PetOverlay() {
             velocityRef.current = -velocityRef.current * BOUNCE_DAMPING;
           } else {
             velocityRef.current = 0;
+            velocityXRef.current = 0;
             landed = true;
             setFalling(false);
+            if (flungRef.current) {
+              flungRef.current = false;
+              setFlinging(false); // land upright, on its feet
+              playThud();
+            }
           }
         }
 
         if (profile) {
           sendPetPosition({
-            x,
+            x: xRef.current,
             y: next,
             facingLeft,
-            state: landed ? 'idle' : 'fall',
+            state: landed ? 'idle' : wasFlung ? 'fling' : 'fall',
             actorId: profile.id,
           });
         }
@@ -528,10 +615,21 @@ export default function PetOverlay() {
     };
     fallRafRef.current = requestAnimationFrame(step);
 
+    // Safety net: never stay airborne/flinging longer than this, so a physics
+    // hiccup can't leave the cat stuck spinning or mid-fall.
+    const watchdog = window.setTimeout(() => {
+      velocityRef.current = 0;
+      velocityXRef.current = 0;
+      flungRef.current = false;
+      setFlinging(false);
+      setFalling(false);
+    }, 5000);
+
     return () => {
       if (fallRafRef.current) cancelAnimationFrame(fallRafRef.current);
+      clearTimeout(watchdog);
     };
-  }, [falling, groundY, x, facingLeft, profile, sendPetPosition]);
+  }, [falling, groundY, facingLeft, profile, sendPetPosition, catSize]);
 
   useEffect(() => {
     if (!dragging && !falling && !asleep) {
@@ -552,6 +650,8 @@ export default function PetOverlay() {
     ? 'drag'
     : falling
     ? 'fall'
+    : remoteControlled && remoteState
+    ? remoteState // partner is dragging/flinging → show it, not idle
     : moving
     ? isRunning
       ? 'run'
@@ -563,20 +663,28 @@ export default function PetOverlay() {
   const catSrc =
     motion === 'sleep'
       ? './sprites/pixel_cat_sleeping.gif'
+      : motion === 'drag'
+      ? './sprites/pixel_cat_drag.png' // being carried
+      : motion === 'walk' || motion === 'run'
+      ? './sprites/pixel_cat_jumping.png' // hopping around
       : motion === 'groom' || motion === 'sit'
       ? './sprites/pixel_cat_sit.png'
-      : './sprites/pixel_cat.gif';
+      : './sprites/pixel_cat_jumping.png'; // fall / fling — airborne pose
 
-  const catAnim =
-    motion === 'walk'
-      ? 'animate-cat-step'
+  const catAnim = flinging || motion === 'fling'
+    ? 'animate-cat-flip' // spinning while flung (local or mirrored from partner)
+    : motion === 'walk'
+      ? 'animate-cat-hop'
       : motion === 'run'
-      ? 'animate-cat-run'
+      ? 'animate-cat-hop-fast'
       : motion === 'groom'
       ? 'animate-cat-groom'
       : motion === 'sleep'
       ? 'animate-cat-breathe'
       : '';
+
+  // Face up while hopping (natural jump pose), flip to face down while dropping.
+  const imgTransform = motion === 'fall' && !flinging ? 'scaleY(-1)' : undefined;
 
   // While a track plays, an otherwise-still cat gently bobs to the music.
   const finalAnim =
@@ -645,12 +753,13 @@ export default function PetOverlay() {
           </div>
 
           {listening && !asleep && (
-            <div
-              className="absolute top-0 right-0 text-sm select-none pointer-events-none animate-pet-bounce"
-              style={{ transform: facingLeft ? 'scaleX(-1)' : 'scaleX(1)' }}
-            >
-              🎧
-            </div>
+            <img
+              src="./sprites/pixel_music_notes.png"
+              alt="music"
+              draggable={false}
+              className="absolute -top-6 left-1/2 pixel-art select-none pointer-events-none animate-music-float"
+              style={{ width: catSize * 0.55, marginLeft: -catSize * 0.275 }}
+            />
           )}
 
           <img
@@ -661,6 +770,7 @@ export default function PetOverlay() {
               height: catSize,
               filter: stageColorFilter(needs?.stage ?? 1),
               transformOrigin: motion === 'groom' ? 'bottom center' : 'center',
+              transform: imgTransform,
             }}
             alt={petName}
             draggable={false}

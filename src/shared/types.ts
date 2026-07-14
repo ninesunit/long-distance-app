@@ -71,7 +71,7 @@ export interface PetPositionPayload {
   x: number;
   y: number;
   facingLeft: boolean;
-  state: 'roam' | 'run' | 'drag' | 'fall' | 'idle';
+  state: 'roam' | 'run' | 'drag' | 'fall' | 'fling' | 'idle';
   actorId: string;
 }
 

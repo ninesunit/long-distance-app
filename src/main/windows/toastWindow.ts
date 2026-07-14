@@ -1,9 +1,8 @@
-﻿import { BrowserWindow, screen, app } from 'electron';
+﻿import { BrowserWindow, screen } from 'electron';
 import path from 'path';
-import { format } from 'url';
 import { hideAllPopups } from './popupWindows';
+import { rendererUrl } from '../staticServer';
 
-const isDev = !app.isPackaged;
 let toastWindow: BrowserWindow | null = null;
 
 export function getOrCreateToastWindow(): BrowserWindow {
@@ -36,12 +35,7 @@ export function getOrCreateToastWindow(): BrowserWindow {
 
   toastWindow.setIgnoreMouseEvents(false);
 
-  if (isDev) {
-    toastWindow.loadURL('http://localhost:5173/toast.html');
-  } else {
-    const filePath = path.join(__dirname, '../../renderer/toast.html');
-    toastWindow.loadURL(`file://${filePath.replace(/\\/g, '/')}`);
-  }
+  toastWindow.loadURL(rendererUrl('toast.html'));
 
   return toastWindow;
 }

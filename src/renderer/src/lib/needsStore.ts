@@ -20,12 +20,10 @@ const HAPPINESS_HOURS_TO_EMPTY = 12;
 const FULLNESS_DECAY_PER_HOUR = NEEDS_MAX / FULLNESS_HOURS_TO_EMPTY;
 const HAPPINESS_DECAY_PER_HOUR = NEEDS_MAX / HAPPINESS_HOURS_TO_EMPTY;
 
-// How much a single interaction restores + the XP it earns. A couple of feeds
-// tops the pet back up; petting is a lighter, more frequent affection tap.
+// How much a single interaction restores. Feeding/petting does NOT grant XP —
+// XP (levels) is earned only by playing the co-op mini-game together.
 const FEED_FULLNESS_GAIN = 45;
 const PET_HAPPINESS_GAIN = 30;
-const FEED_XP = 12;
-const PET_XP = 8;
 
 export const XP_PER_STAGE = 100;
 export const MAX_STAGE = 5;
@@ -95,13 +93,12 @@ export async function applyInteraction(
 ): Promise<PetNeeds> {
   const coupleKey = getCoupleKey(userId, partnerId);
   const current = decayNeeds(await fetchNeeds(userId, partnerId));
-  const experience = current.experience + (type === 'feed' ? FEED_XP : PET_XP);
-
+  // No XP from feed/pet — experience is unchanged here.
   const next: PetNeeds = {
     fullness: clamp(current.fullness + (type === 'feed' ? FEED_FULLNESS_GAIN : 0)),
     happiness: clamp(current.happiness + (type === 'pet' ? PET_HAPPINESS_GAIN : 0)),
-    experience,
-    stage: stageFromXp(experience),
+    experience: current.experience,
+    stage: current.stage,
     updated_at: new Date().toISOString(),
   };
 

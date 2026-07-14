@@ -1,7 +1,7 @@
-import { BrowserWindow, screen, app } from 'electron';
+import { BrowserWindow, screen } from 'electron';
 import path from 'path';
+import { rendererUrl } from '../staticServer';
 
-const isDev = !app.isPackaged;
 let overlayWindow: BrowserWindow | null = null;
 
 export function createPetOverlayWindow(): BrowserWindow {
@@ -37,11 +37,7 @@ export function createPetOverlayWindow(): BrowserWindow {
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   win.setFullScreenable(false);
 
-  if (isDev) {
-    win.loadURL('http://localhost:5173/pet-overlay.html');
-  } else {
-    win.loadFile(path.join(__dirname, '../../renderer/pet-overlay.html'));
-  }
+  win.loadURL(rendererUrl('pet-overlay.html'));
 
   win.on('closed', () => {
     overlayWindow = null;

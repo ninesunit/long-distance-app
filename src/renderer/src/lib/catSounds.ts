@@ -38,6 +38,50 @@ export function resumeCatAudio(): void {
   if (!buffer) loadBuffer();
 }
 
+// Whoosh when the cat is flung through the air.
+export function playWhoosh(): void {
+  const c = ac();
+  if (c.state === 'suspended') c.resume();
+  const t = c.currentTime;
+  const dur = 0.3;
+  const n = Math.floor(c.sampleRate * dur);
+  const buf = c.createBuffer(1, n, c.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n);
+  const src = c.createBufferSource();
+  src.buffer = buf;
+  const bp = c.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.Q.value = 1;
+  bp.frequency.setValueAtTime(400, t);
+  bp.frequency.exponentialRampToValueAtTime(2600, t + dur);
+  const g = c.createGain();
+  g.gain.setValueAtTime(0.22, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+  src.connect(bp);
+  bp.connect(g);
+  g.connect(bus!);
+  src.start(t);
+}
+
+// Soft thud when the cat lands on its feet.
+export function playThud(): void {
+  const c = ac();
+  if (c.state === 'suspended') c.resume();
+  const t = c.currentTime;
+  const osc = c.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(170, t);
+  osc.frequency.exponentialRampToValueAtTime(48, t + 0.15);
+  const g = c.createGain();
+  g.gain.setValueAtTime(0.32, t);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+  osc.connect(g);
+  g.connect(bus!);
+  osc.start(t);
+  osc.stop(t + 0.2);
+}
+
 export function playMeow(): void {
   const c = ac();
   if (c.state === 'suspended') c.resume();

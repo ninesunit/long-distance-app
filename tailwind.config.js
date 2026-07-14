@@ -41,6 +41,10 @@ module.exports = {
         'cat-run': 'catRun 0.26s ease-in-out infinite',
         'cat-groom': 'catGroom 0.75s ease-in-out infinite',
         'cat-breathe': 'catBreathe 2.6s ease-in-out infinite',
+        'music-float': 'musicFloat 1.6s ease-in-out infinite',
+        'cat-flip': 'catFlip 0.5s linear infinite',
+        'cat-hop': 'catHop 0.55s ease-in-out infinite',
+        'cat-hop-fast': 'catHop 0.32s ease-in-out infinite',
       },
       keyframes: {
         slideIn: {
@@ -86,6 +90,21 @@ module.exports = {
         catBreathe: {
           '0%, 100%': { transform: 'scale(1)' },
           '50%': { transform: 'scale(1.05)' },
+        },
+        // Music notes bobbing above the cat's head
+        musicFloat: {
+          '0%, 100%': { transform: 'translateY(0)', opacity: '0.9' },
+          '50%': { transform: 'translateY(-5px)', opacity: '1' },
+        },
+        // Spin while flung through the air (lands upright when it stops)
+        catFlip: {
+          '0%': { transform: 'rotate(0deg)' },
+          '100%': { transform: 'rotate(360deg)' },
+        },
+        // Pronounced hop while roaming (visibly jumps up and lands)
+        catHop: {
+          '0%, 100%': { transform: 'translateY(0)' },
+          '45%': { transform: 'translateY(-26%)' },
         },
       },
     },

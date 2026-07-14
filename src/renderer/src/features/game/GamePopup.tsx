@@ -184,7 +184,9 @@ export default function GamePopup() {
       playSfx('gameover');
       goScreen('over');
       if (profile?.partner_id && s > 0) {
-        const updated = await applyHappinessBoost(profile.id, profile.partner_id, h, Math.min(XP_CAP, s * XP_PER));
+        // Solo play boosts happiness but grants NO XP — levels come only from
+        // playing together (versus).
+        const updated = await applyHappinessBoost(profile.id, profile.partner_id, h, 0);
         sendNeedsUpdate({
           fullness: updated.fullness,
           happiness: updated.happiness,
