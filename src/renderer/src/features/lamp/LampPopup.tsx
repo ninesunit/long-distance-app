@@ -51,11 +51,14 @@ export default function LampPopup() {
   const holdingRef = useRef(false);
   const ignitedRef = useRef(false);
   const myIntensityRef = useRef(0);
+  const lastLampBroadcastRef = useRef(0);
 
   const [songs, setSongs] = useState<Song[]>([]);
   const songsRef = useRef<Song[]>([]);
   songsRef.current = songs;
   const [currentSongId, setCurrentSongId] = useState<string | null>(null);
+  const currentSongIdRef = useRef<string | null>(null);
+  currentSongIdRef.current = currentSongId;
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(0.7);
   const [uploading, setUploading] = useState(false);
@@ -81,8 +84,14 @@ export default function LampPopup() {
   const [marqueeX, setMarqueeX] = useState(0);
   const marqueeRafRef = useRef<number | null>(null);
 
-  const { sendLampUpdate, sendMusicUpdate } = useCoupleChannel(profile?.id, profile?.partner_id ?? undefined, {
+  const { sendLampUpdate, sendMusicUpdate, sendMusicLibraryChanged } = useCoupleChannel(
+    profile?.id,
+    profile?.partner_id ?? undefined,
+    {
     onLampUpdate: (payload) => setPartnerIntensity(payload.intensity),
+    onMusicLibraryChanged: () => {
+      if (profile?.partner_id) fetchSongs(profile.id, profile.partner_id).then(setSongs);
+    },
     onMusicUpdate: (payload: MusicBroadcastPayload) => {
       if (payload.actorId === profile?.id) return;
       setCurrentSongId(payload.songId);
@@ -92,7 +101,14 @@ export default function LampPopup() {
       if (payload.songId && !songsRef.current.some((s) => s.id === payload.songId) && profile?.partner_id) {
         fetchSongs(profile.id, profile.partner_id).then(setSongs);
       }
-      if (audioRef.current && Math.abs(audioRef.current.currentTime - payload.positionSeconds) > 2) {
+      const song = songsRef.current.find((s) => s.id === payload.songId);
+      if (song && isYouTubeUrl(song.file_url)) {
+        // Sync a YouTube seek from the partner.
+        const p = ytPlayerRef.current;
+        if (p && ytReadyRef.current && Math.abs((p.getCurrentTime?.() ?? 0) - payload.positionSeconds) > 2) {
+          p.seekTo?.(payload.positionSeconds, true);
+        }
+      } else if (audioRef.current && Math.abs(audioRef.current.currentTime - payload.positionSeconds) > 2) {
         audioRef.current.currentTime = payload.positionSeconds;
       }
     },
@@ -118,6 +134,10 @@ export default function LampPopup() {
       fetchSongs(profile.id, profile.partner_id).then(setSongs);
       fetchNowPlaying(profile.id, profile.partner_id).then((np) => {
         if (!np) return;
+        // If the same song is already loaded/playing, DON'T re-seek — that was
+        // restarting the track every time the popup opened. Only catch up when
+        // the current song actually differs from what we already have.
+        if (np.song_id === currentSongIdRef.current) return;
         setCurrentSongId(np.song_id);
         setIsPlaying(np.is_playing);
         if (audioRef.current && np.song_id && Number.isFinite(np.position_seconds)) {
@@ -280,6 +300,7 @@ export default function LampPopup() {
     setUploading(false);
     if (song) {
       setSongs((prev) => [song, ...prev]);
+      sendMusicLibraryChanged(); // partner refetches the library
       handleSelectSong(song.id); // auto-play the new upload (syncs to the partner)
     }
     setPendingFile(null);
@@ -297,6 +318,7 @@ export default function LampPopup() {
     const success = await deleteSong(songId);
     if (success) {
       setSongs((prev) => prev.filter((s) => s.id !== songId));
+      sendMusicLibraryChanged(); // partner drops it from their list too
       if (currentSongId === songId) {
         setCurrentSongId(null);
         setIsPlaying(false);
@@ -416,6 +438,7 @@ export default function LampPopup() {
     const song = await addYoutubeSong(profile.id, profile.partner_id, url, ytTitle.trim());
     if (song) {
       setSongs((prev) => [song, ...prev]);
+      sendMusicLibraryChanged(); // partner refetches the library
       handleSelectSong(song.id);
     }
     setYtUrl('');
@@ -434,8 +457,15 @@ export default function LampPopup() {
     const rounded = Math.abs(next - target) < 0.01 ? target : next;
     myIntensityRef.current = rounded;
     setMyIntensity(rounded);
-    sendLampUpdate({ intensity: rounded, holderId: profile.id });
-    if (Math.abs(rounded - target) > 0.001) {
+    const settled = Math.abs(rounded - target) < 0.001;
+    // Throttle broadcasts (~15/sec) instead of every frame — spamming the flame
+    // was flooding Supabase and disconnecting both users. Always send the final.
+    const nowMs = Date.now();
+    if (settled || nowMs - lastLampBroadcastRef.current > 66) {
+      lastLampBroadcastRef.current = nowMs;
+      sendLampUpdate({ intensity: rounded, holderId: profile.id });
+    }
+    if (!settled) {
       rafRef.current = requestAnimationFrame(tick);
     } else {
       rafRef.current = null;

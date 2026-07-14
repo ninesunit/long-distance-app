@@ -30,6 +30,7 @@ interface Handlers {
   onGameSignal?: (payload: GameSignal) => void;
   onPartnerOnline?: () => void;
   onPinsChanged?: () => void;
+  onMusicLibraryChanged?: () => void;
 }
 
 export function useCoupleChannel(
@@ -104,6 +105,9 @@ export function useCoupleChannel(
       .on('broadcast', { event: 'pins_changed' }, () => {
         handlersRef.current.onPinsChanged?.();
       })
+      .on('broadcast', { event: 'music_library' }, () => {
+        handlersRef.current.onMusicLibraryChanged?.();
+      })
       .subscribe((status) => {
         setConnected(status === 'SUBSCRIBED');
         if (status === 'SUBSCRIBED' && options?.trackPresence) {
@@ -161,6 +165,10 @@ export function useCoupleChannel(
     channelRef.current?.send({ type: 'broadcast', event: 'pins_changed', payload: {} });
   }, []);
 
+  const sendMusicLibraryChanged = useCallback(() => {
+    channelRef.current?.send({ type: 'broadcast', event: 'music_library', payload: {} });
+  }, []);
+
   return {
     connected,
     sendLampUpdate,
@@ -173,5 +181,6 @@ export function useCoupleChannel(
     sendNeedsUpdate,
     sendGameSignal,
     sendPinsChanged,
+    sendMusicLibraryChanged,
   };
 }

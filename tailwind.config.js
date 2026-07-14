@@ -43,7 +43,7 @@ module.exports = {
         'cat-breathe': 'catBreathe 2.6s ease-in-out infinite',
         'music-float': 'musicFloat 1.6s ease-in-out infinite',
         'cat-flip': 'catFlip 0.5s linear infinite',
-        'cat-jump': 'catJump 0.8s ease-in-out infinite',
+        'cat-jump': 'catJump 1.5s ease-in-out infinite',
       },
       keyframes: {
         slideIn: {
@@ -100,12 +100,13 @@ module.exports = {
           '0%': { transform: 'rotate(0deg)' },
           '100%': { transform: 'rotate(360deg)' },
         },
-        // A jump arc: rise facing up, flip at the apex, come down facing down.
+        // A real jump arc: rise a quarter of the screen facing up (weight), then
+        // ROTATE (not mirror) to face down at the apex and fall.
         catJump: {
-          '0%': { transform: 'translateY(0) scaleY(1)' },
-          '40%': { transform: 'translateY(-45%) scaleY(1)' },
-          '55%': { transform: 'translateY(-45%) scaleY(-1)' },
-          '100%': { transform: 'translateY(0) scaleY(-1)' },
+          '0%': { transform: 'translateY(0) rotate(0deg)' },
+          '45%': { transform: 'translateY(-25vh) rotate(0deg)' },
+          '55%': { transform: 'translateY(-25vh) rotate(180deg)' },
+          '100%': { transform: 'translateY(0) rotate(180deg)' },
         },
       },
     },

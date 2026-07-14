@@ -30,7 +30,7 @@ const IDLE_TIMEOUT_MS = 90000;
 const DRAG_BROADCAST_INTERVAL_MS = 66; // ~15/sec — well under Supabase's rate limit
 const WALK_DURATION_MS = 5000;
 const RUN_DURATION_MS = 1200;
-const JUMP_DURATION_MS = 1600;
+const JUMP_DURATION_MS = 1500;
 const GROOM_DURATION_MS = 1800;
 const FLING_SPEED = 20; // px/frame at release to count as a fling (vs a gentle drop)
 const AIR_FRICTION = 0.985;
@@ -713,8 +713,8 @@ export default function PetOverlay() {
       ? 'animate-cat-breathe'
       : '';
 
-  // Flip to face down while dropping (jump/fling anims handle their own flips).
-  const imgTransform = motion === 'fall' && !flinging ? 'scaleY(-1)' : undefined;
+  // Rotate to face down while dropping (jump/fling anims handle their own).
+  const imgTransform = motion === 'fall' && !flinging ? 'rotate(180deg)' : undefined;
 
   // While a track plays, an otherwise-still cat gently bobs to the music.
   const finalAnim =
