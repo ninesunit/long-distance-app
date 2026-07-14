@@ -9,7 +9,7 @@ if (!supabaseUrl || !supabaseAnonKey) {
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false },
-  realtime: { params: { eventsPerSecond: 10 } },
+  realtime: { params: { eventsPerSecond: 20 } },
 });
 
 // Set auth immediately for whatever session already exists on load, THEN

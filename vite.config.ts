@@ -25,6 +25,7 @@ export default defineConfig({
         note: path.resolve(__dirname, 'src/renderer/note.html'),
         lamp: path.resolve(__dirname, 'src/renderer/lamp.html'),
         settings: path.resolve(__dirname, 'src/renderer/settings.html'),
+        game: path.resolve(__dirname, 'src/renderer/game.html'),
         toast: path.resolve(__dirname, 'src/renderer/toast.html'),
       },
     },

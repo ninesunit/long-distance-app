@@ -83,29 +83,27 @@ function DockBar({ profileId, partnerId }: { profileId: string; partnerId: strin
     { key: 'pet', icon: './sprites/pixel_cat.gif', label: 'Pet' },
     { key: 'note', icon: './sprites/pixel_letter.gif', label: 'Notes' },
     { key: 'lamp', icon: './sprites/pixel_flame.gif', label: 'Lamp' },
-    { key: 'settings', icon: './sprites/pixel_settings.jpg', label: 'Settings' },
+    { key: 'settings', icon: './sprites/pixel_settings.png', label: 'Settings' },
   ];
 
   return (
     <div className="w-full h-full flex items-center justify-center relative">
-      <div className="drag-region flex items-center gap-3 bg-white/70 backdrop-blur-md rounded-full px-4 py-3 shadow-xl border border-white/50">
+      <div className="drag-region pixel-window flex items-center gap-2.5 px-3.5 py-2.5">
         {icons.map((icon) => (
-  <button
-    key={icon.key}
-    onClick={() => (icon.key === 'note' ? handleNotesClick() : window.api.toggleWindow(icon.key))}
-    title={icon.label}
-    className="no-drag w-12 h-12 rounded-full bg-gradient-to-br from-blush to-campfire/40 flex items-center justify-center hover:scale-110 active:scale-95 transition-all shadow-md relative"
-  >
-    <div className="w-full h-full rounded-full overflow-hidden flex items-center justify-center">
-      <img src={icon.icon} className="w-7 h-7 pixel-art" alt={icon.label} />
-    </div>
-    {icon.key === 'note' && unreadCount > 0 && (
-      <span className="absolute -top-2 -right-2 min-w-[20px] h-[20px] px-1 flex items-center justify-center bg-campfire text-white text-[10px] font-pixel rounded-none border-2 border-white shadow-sm z-10">
-        {unreadCount > 9 ? '9+' : unreadCount}
-      </span>
-    )}
-  </button>
-))}
+          <button
+            key={icon.key}
+            onClick={() => (icon.key === 'note' ? handleNotesClick() : window.api.toggleWindow(icon.key))}
+            title={icon.label}
+            className="no-drag w-11 h-11 border-2 border-ink bg-cozy shadow-pixel-btn-sm flex items-center justify-center hover:-translate-y-0.5 hover:bg-blush active:translate-x-0.5 active:translate-y-0.5 active:shadow-none transition-all relative"
+          >
+            <img src={icon.icon} className="w-7 h-7 pixel-art" alt={icon.label} />
+            {icon.key === 'note' && unreadCount > 0 && (
+              <span className="pixel-badge absolute -top-2.5 -right-2.5 min-w-[20px] h-[20px] px-1 flex items-center justify-center text-[10px] leading-none z-10">
+                {unreadCount > 9 ? '9+' : unreadCount}
+              </span>
+            )}
+          </button>
+        ))}
       </div>
     </div>
   );

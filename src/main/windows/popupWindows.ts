@@ -4,13 +4,14 @@ import { getDockWindow } from './dockWindow';
 
 const isDev = !app.isPackaged;
 
-export type PopupName = 'pet' | 'note' | 'lamp' | 'settings';
+export type PopupName = 'pet' | 'note' | 'lamp' | 'settings' | 'game';
 
 const POPUP_SIZE: Record<PopupName, { width: number; height: number }> = {
   pet: { width: 260, height: 320 },
   note: { width: 280, height: 360 },
   lamp: { width: 260, height: 350 },
   settings: { width: 260, height: 340 },
+  game: { width: 300, height: 400 },
 };
 
 const popups = new Map<PopupName, BrowserWindow>();
@@ -48,7 +49,7 @@ function createPopup(name: PopupName): BrowserWindow {
 
   if (isDev) {
     win.loadURL(`http://localhost:5173/${name}.html`);
-    // win.webContents.openDevTools({ mode: 'detach' });
+    win.webContents.openDevTools({ mode: 'detach' });
   } else {
     win.loadFile(path.join(__dirname, `../../renderer/${name}.html`));
   }
@@ -73,7 +74,9 @@ export function togglePopup(name: PopupName): void {
 
   let win = popups.get(name);
 
-  if (!win || win.isDestroyed()) {
+  // Recreate if the window or its renderer is gone (e.g. a renderer crash) so a
+  // dead window can't wedge the popup permanently.
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) {
     win = createPopup(name);
     win.once('ready-to-show', () => {
       positionPopup(win!, name);
@@ -99,6 +102,14 @@ export function togglePopup(name: PopupName): void {
 export function hideAllPopups(): void {
   popups.forEach((win) => win.hide());
   activePopup = null;
+}
+
+// Create a popup window hidden and keep it alive, without showing it. Used so
+// the Lamp's audio element always exists — both partners hear a track the
+// moment it plays, without having to open the Lamp popup first.
+export function precreatePopup(name: PopupName): void {
+  const existing = popups.get(name);
+  if (!existing || existing.isDestroyed()) createPopup(name);
 }
 
 export function repositionActivePopup(): void {

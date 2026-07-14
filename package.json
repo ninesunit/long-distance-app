@@ -1,6 +1,6 @@
 {
   "name": "long-distance-app",
-  "version": "0.1.8",
+  "version": "0.3.0",
   "description": "A cute real-time desktop companion app for couples",
   "main": "dist/main/index.js",
   "author": "Ninesunit",
@@ -34,6 +34,12 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "ninesunit",
+      "repo": "long-distance-app",
+      "releaseType": "release"
     }
   },
   "dependencies": {

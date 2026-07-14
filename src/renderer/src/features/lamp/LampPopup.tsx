@@ -1,7 +1,37 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { useAuth } from '../auth/useAuth';
 import { useCoupleChannel } from '../realtime/useCoupleChannel';
-import { fetchSongs, uploadSong, deleteSong, fetchNowPlaying, setNowPlaying, type Song } from '../../lib/musicStore';
+import {
+  fetchSongs,
+  uploadSong,
+  deleteSong,
+  fetchNowPlaying,
+  setNowPlaying,
+  addYoutubeSong,
+  isYouTubeUrl,
+  parseYouTubeId,
+  type Song,
+} from '../../lib/musicStore';
+import { LampGlowLayer } from '../../components/LampGlow';
+
+// Lazily load the YouTube IFrame API once (returns window.YT).
+function loadYouTubeApi(): Promise<any> {
+  const w = window as any;
+  if (w.YT && w.YT.Player) return Promise.resolve(w.YT);
+  return new Promise((resolve) => {
+    const prev = w.onYouTubeIframeAPIReady;
+    w.onYouTubeIframeAPIReady = () => {
+      if (prev) prev();
+      resolve(w.YT);
+    };
+    if (!document.getElementById('yt-iframe-api')) {
+      const s = document.createElement('script');
+      s.id = 'yt-iframe-api';
+      s.src = 'https://www.youtube.com/iframe_api';
+      document.body.appendChild(s);
+    }
+  });
+}
 import type { MusicBroadcastPayload } from '../../../../shared/types';
 
 function formatDuration(seconds: number): string {
@@ -19,6 +49,8 @@ export default function LampPopup() {
   const [ignited, setIgnited] = useState(false);
   const rafRef = useRef<number | null>(null);
   const holdingRef = useRef(false);
+  const ignitedRef = useRef(false);
+  const myIntensityRef = useRef(0);
 
   const [songs, setSongs] = useState<Song[]>([]);
   const [currentSongId, setCurrentSongId] = useState<string | null>(null);
@@ -32,6 +64,16 @@ export default function LampPopup() {
   const [seeking, setSeeking] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // YouTube backend (only used when the current song's file_url is a YT link).
+  const ytPlayerRef = useRef<any>(null);
+  const ytContainerRef = useRef<HTMLDivElement>(null);
+  const ytReadyRef = useRef(false);
+  const currentIsYTRef = useRef(false);
+  const skipSongRef = useRef<(d: 1 | -1) => void>(() => {});
+  const [showYt, setShowYt] = useState(false);
+  const [ytUrl, setYtUrl] = useState('');
+  const [ytTitle, setYtTitle] = useState('');
   const marqueeContainerRef = useRef<HTMLDivElement>(null);
   const marqueeTextRef = useRef<HTMLParagraphElement>(null);
   const [marqueeX, setMarqueeX] = useState(0);
@@ -63,23 +105,53 @@ export default function LampPopup() {
   useEffect(() => {
     const unsubscribe = window.api.onPopupShown(() => {
       if (!profile?.partner_id) return;
+      // Refetch the shared library AND catch up to whatever the couple is
+      // currently playing (song + play/pause + position), so reopening the
+      // Lamp syncs to your partner instead of showing a stale state.
       fetchSongs(profile.id, profile.partner_id).then(setSongs);
+      fetchNowPlaying(profile.id, profile.partner_id).then((np) => {
+        if (!np) return;
+        setCurrentSongId(np.song_id);
+        setIsPlaying(np.is_playing);
+        if (audioRef.current && np.song_id && Number.isFinite(np.position_seconds)) {
+          const applySeek = () => {
+            if (audioRef.current) audioRef.current.currentTime = np.position_seconds;
+          };
+          if (audioRef.current.readyState >= 1) applySeek();
+          else audioRef.current.addEventListener('loadedmetadata', applySeek, { once: true });
+        }
+      });
     });
     return unsubscribe;
   }, [profile]);
 
+  const currentSong = songs.find((s) => s.id === currentSongId) ?? null;
+  const currentIsYT = currentSong ? isYouTubeUrl(currentSong.file_url) : false;
+  currentIsYTRef.current = currentIsYT;
+
   useEffect(() => {
+    if (currentIsYT) {
+      const p = ytPlayerRef.current;
+      if (!p || !ytReadyRef.current) return;
+      if (isPlaying) p.playVideo?.();
+      else p.pauseVideo?.();
+      return;
+    }
     if (!audioRef.current) return;
     if (isPlaying) {
       audioRef.current.play().catch(() => {});
     } else {
       audioRef.current.pause();
     }
-  }, [isPlaying, currentSongId]);
+  }, [isPlaying, currentSongId, currentIsYT]);
 
   useEffect(() => {
+    if (currentIsYT) {
+      ytPlayerRef.current?.setVolume?.(Math.round(volume * 100));
+      return;
+    }
     if (audioRef.current) audioRef.current.volume = volume;
-  }, [volume]);
+  }, [volume, currentIsYT]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -98,8 +170,7 @@ export default function LampPopup() {
     };
   }, [currentSongId, seeking]);
 
-  // currentSong must be computed BEFORE the marquee effect below references it
-  const currentSong = songs.find((s) => s.id === currentSongId) ?? null;
+  // currentSong / currentIsYT are computed earlier (the audio effects need them)
 
   useEffect(() => {
     if (marqueeRafRef.current) cancelAnimationFrame(marqueeRafRef.current);
@@ -141,7 +212,10 @@ export default function LampPopup() {
   const broadcastState = useCallback(
     (songId: string | null, playing: boolean, position?: number) => {
       if (!profile || !profile.partner_id) return;
-      const pos = position ?? audioRef.current?.currentTime ?? 0;
+      const pos =
+        position ??
+        (currentIsYTRef.current ? ytPlayerRef.current?.getCurrentTime?.() : audioRef.current?.currentTime) ??
+        0;
       sendMusicUpdate({ songId, isPlaying: playing, positionSeconds: pos, actorId: profile.id });
       setNowPlaying(profile.id, profile.partner_id, {
         song_id: songId,
@@ -179,7 +253,8 @@ export default function LampPopup() {
   };
 
   const handleSeekCommit = (value: number) => {
-    if (audioRef.current) audioRef.current.currentTime = value;
+    if (currentIsYT) ytPlayerRef.current?.seekTo?.(value, true);
+    else if (audioRef.current) audioRef.current.currentTime = value;
     setSeeking(false);
     broadcastState(currentSongId, isPlaying, value);
   };
@@ -221,36 +296,151 @@ export default function LampPopup() {
     }
   };
 
+  skipSongRef.current = skipSong;
+
+  // Create/refresh the YouTube player when the current song is a YT link.
+  // IMPORTANT: YT replaces its target element with an <iframe>. Pointing it at a
+  // React-managed node corrupts React's DOM tree (crashing the renderer). So we
+  // append an imperatively-created child into a React container and let YT
+  // replace THAT — React only ever owns the container.
+  useEffect(() => {
+    if (!currentIsYT || !currentSong) {
+      if (ytPlayerRef.current) {
+        try {
+          ytPlayerRef.current.destroy?.();
+        } catch {
+          /* noop */
+        }
+        ytPlayerRef.current = null;
+        ytReadyRef.current = false;
+      }
+      return;
+    }
+    const videoId = parseYouTubeId(currentSong.file_url);
+    if (!videoId) return;
+    let cancelled = false;
+
+    loadYouTubeApi().then((YT) => {
+      if (cancelled || !ytContainerRef.current) return;
+
+      if (ytPlayerRef.current && ytReadyRef.current) {
+        try {
+          ytPlayerRef.current.loadVideoById(videoId);
+          if (!isPlaying) ytPlayerRef.current.pauseVideo();
+        } catch {
+          /* noop */
+        }
+        return;
+      }
+      if (ytPlayerRef.current) return; // creation already in flight
+
+      const host = document.createElement('div');
+      ytContainerRef.current.innerHTML = '';
+      ytContainerRef.current.appendChild(host);
+      try {
+        ytPlayerRef.current = new YT.Player(host, {
+          width: '100%',
+          height: '100%',
+          videoId,
+          playerVars: { autoplay: 1, controls: 1, disablekb: 1, playsinline: 1, modestbranding: 1, rel: 0 },
+          events: {
+            onReady: (e: any) => {
+              ytReadyRef.current = true;
+              e.target.setVolume(Math.round(volume * 100));
+              if (!isPlaying) e.target.pauseVideo();
+            },
+            onStateChange: (e: any) => {
+              if (e.data === 0) skipSongRef.current(1); // 0 = ended → next track
+            },
+          },
+        });
+      } catch (err) {
+        console.error('YouTube player failed to init:', err);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIsYT, currentSongId]);
+
+  // Tear down the YT player when the popup unmounts.
+  useEffect(() => {
+    return () => {
+      try {
+        ytPlayerRef.current?.destroy?.();
+      } catch {
+        /* noop */
+      }
+      ytPlayerRef.current = null;
+    };
+  }, []);
+
+  // Poll the YT player for progress (parallels the <audio> timeupdate path).
+  useEffect(() => {
+    if (!currentIsYT) return;
+    const id = window.setInterval(() => {
+      const p = ytPlayerRef.current;
+      if (!p || !ytReadyRef.current) return;
+      if (!seeking && p.getCurrentTime) setCurrentTime(p.getCurrentTime());
+      if (p.getDuration) setDuration(p.getDuration());
+    }, 500);
+    return () => clearInterval(id);
+  }, [currentIsYT, seeking]);
+
+  const handleAddYoutube = async () => {
+    const url = ytUrl.trim();
+    if (!url || !profile?.partner_id) return;
+    if (!parseYouTubeId(url)) return; // not a recognizable YouTube link
+    const song = await addYoutubeSong(profile.id, profile.partner_id, url, ytTitle.trim());
+    if (song) {
+      setSongs((prev) => [song, ...prev]);
+      handleSelectSong(song.id);
+    }
+    setYtUrl('');
+    setYtTitle('');
+    setShowYt(false);
+  };
+
+  // Drive the flame animation off refs (not the `ignited` closure) so rapid
+  // presses can't strand the loop at a stale target — the running frame always
+  // reads the latest holding/ignited/intensity values.
   const tick = useCallback(() => {
     if (!profile) return;
-    setMyIntensity((prev) => {
-      const target = holdingRef.current ? 1 : ignited ? 0.4 : 0;
-      const next = prev + (target - prev) * 0.08;
-      const rounded = Math.abs(next - target) < 0.01 ? target : next;
-      sendLampUpdate({ intensity: rounded, holderId: profile.id });
-      if (Math.abs(rounded - target) > 0.001) {
-        rafRef.current = requestAnimationFrame(tick);
-      } else {
-        rafRef.current = null;
-      }
-      return rounded;
-    });
-  }, [profile, ignited, sendLampUpdate]);
+    const target = holdingRef.current ? 1 : ignitedRef.current ? 0.4 : 0;
+    const prev = myIntensityRef.current;
+    const next = prev + (target - prev) * 0.12;
+    const rounded = Math.abs(next - target) < 0.01 ? target : next;
+    myIntensityRef.current = rounded;
+    setMyIntensity(rounded);
+    sendLampUpdate({ intensity: rounded, holderId: profile.id });
+    if (Math.abs(rounded - target) > 0.001) {
+      rafRef.current = requestAnimationFrame(tick);
+    } else {
+      rafRef.current = null;
+    }
+  }, [profile, sendLampUpdate]);
+
+  const ensureTick = useCallback(() => {
+    if (rafRef.current === null) rafRef.current = requestAnimationFrame(tick);
+  }, [tick]);
 
   const startHold = useCallback(() => {
     holdingRef.current = true;
-    if (rafRef.current === null) rafRef.current = requestAnimationFrame(tick);
-  }, [tick]);
+    ensureTick();
+  }, [ensureTick]);
 
   const endHold = useCallback(() => {
     holdingRef.current = false;
-    if (rafRef.current === null) rafRef.current = requestAnimationFrame(tick);
-  }, [tick]);
+    ensureTick();
+  }, [ensureTick]);
 
   const handleFlameClick = useCallback(() => {
-    setIgnited((prev) => !prev);
-    if (rafRef.current === null) rafRef.current = requestAnimationFrame(tick);
-  }, [tick]);
+    ignitedRef.current = !ignitedRef.current;
+    setIgnited(ignitedRef.current);
+    ensureTick();
+  }, [ensureTick]);
 
   useEffect(() => {
     return () => {
@@ -267,8 +457,8 @@ export default function LampPopup() {
   return (
     <div className="w-full h-full relative p-3 font-sans">
       <div className="drag-region absolute top-0 left-0 w-full h-5" />
-      <div className="w-full h-full rounded-3xl overflow-hidden shadow-xl border border-white/50">
-        <div className="w-full h-full bg-white/90 backdrop-blur-md flex flex-col items-center gap-2 p-3 overflow-y-auto overflow-x-hidden no-drag">
+      <div className="pixel-window relative w-full h-full flex flex-col items-center gap-2 p-3 overflow-y-auto overflow-x-hidden no-drag">
+          <LampGlowLayer intensity={displayIntensity} />
           <div
             className="relative flex items-center justify-center h-16 cursor-pointer flex-shrink-0"
             onClick={handleFlameClick}
@@ -294,24 +484,32 @@ export default function LampPopup() {
             />
           </div>
 
-          <div className="w-full h-px bg-gray-200" />
+          <div className="w-full h-0.5 bg-ink/15" />
 
           <div className="w-full flex flex-col gap-2 font-pixel min-w-0">
             <div ref={marqueeContainerRef} className="relative w-full h-4 overflow-hidden flex-shrink-0">
               <p
                 ref={marqueeTextRef}
-                className="text-[10px] text-gray-500 whitespace-nowrap absolute top-0"
+                className="text-[10px] text-ink whitespace-nowrap absolute top-0"
                 style={{ transform: `translateX(${marqueeX}px)` }}
               >
                 {currentSong ? currentSong.title : 'No song selected'}
               </p>
             </div>
 
+            {/* YouTube video (sized + visible so it actually plays). React owns
+                this container; YT replaces an imperatively-added child inside it. */}
+            <div
+              ref={ytContainerRef}
+              className="w-full border-2 border-ink bg-black flex-shrink-0"
+              style={{ aspectRatio: '16 / 9', display: currentIsYT ? 'block' : 'none' }}
+            />
+
             <div className="flex items-center gap-1 w-full min-w-0">
               <select
                 value={currentSongId ?? ''}
                 onChange={(e) => e.target.value && handleSelectSong(e.target.value)}
-                className="flex-1 min-w-0 text-[10px] font-sans px-2 py-1.5 rounded-lg bg-cozy outline-none"
+                className="pixel-input flex-1 min-w-0 text-[10px] font-sans px-2 py-1.5"
               >
                 <option value="" disabled>
                   {songs.length === 0 ? 'No songs yet' : 'Choose a song...'}
@@ -353,17 +551,17 @@ export default function LampPopup() {
             </div>
 
             <div className="flex items-center justify-center gap-3">
-              <button onClick={() => skipSong(-1)} className="text-lg hover:scale-110 transition">
+              <button onClick={() => skipSong(-1)} className="text-lg text-ink hover:scale-110 transition">
                 ⏮
               </button>
               <button
                 onClick={togglePlayPause}
                 disabled={!currentSongId}
-                className="w-8 h-8 rounded-full bg-campfire text-white flex items-center justify-center text-sm disabled:opacity-40 hover:scale-110 transition"
+                className="pixel-btn pixel-btn--primary w-9 h-9 flex items-center justify-center text-sm"
               >
                 {isPlaying ? '⏸' : '▶'}
               </button>
-              <button onClick={() => skipSong(1)} className="text-lg hover:scale-110 transition">
+              <button onClick={() => skipSong(1)} className="text-lg text-ink hover:scale-110 transition">
                 ⏭
               </button>
             </div>
@@ -389,26 +587,19 @@ export default function LampPopup() {
                   onChange={(e) => setUploadTitleInput(e.target.value)}
                   placeholder="Song title"
                   autoFocus
-                  className="text-[10px] font-sans px-2 py-1 rounded-lg bg-cozy outline-none"
+                  className="pixel-input text-[10px] font-sans px-2 py-1"
                 />
                 <div className="flex gap-1">
-                  <button
-                    onClick={confirmUpload}
-                    disabled={uploading}
-                    className="flex-1 text-[10px] py-1 rounded-lg bg-campfire text-white disabled:opacity-50"
-                  >
+                  <button onClick={confirmUpload} disabled={uploading} className="pixel-btn pixel-btn--primary flex-1 text-[10px] py-1">
                     {uploading ? 'Uploading...' : 'Confirm Upload'}
                   </button>
-                  <button onClick={cancelUpload} className="text-[10px] px-2 rounded-lg bg-gray-200">
+                  <button onClick={cancelUpload} className="pixel-btn text-[10px] px-2 py-1">
                     Cancel
                   </button>
                 </div>
               </div>
             ) : (
-              <button
-                onClick={() => fileInputRef.current?.click()}
-                className="text-[10px] font-sans py-1.5 rounded-lg bg-lavender/70 hover:bg-lavender transition"
-              >
+              <button onClick={() => fileInputRef.current?.click()} className="pixel-btn pixel-btn--accent text-[10px] font-sans py-1.5">
                 + Upload MP3
               </button>
             )}
@@ -419,12 +610,54 @@ export default function LampPopup() {
               onChange={handleFileSelected}
               className="hidden"
             />
+
+            {showYt ? (
+              <div className="flex flex-col gap-1">
+                <input
+                  type="text"
+                  value={ytUrl}
+                  onChange={(e) => setYtUrl(e.target.value)}
+                  placeholder="Paste YouTube link"
+                  autoFocus
+                  className="pixel-input text-[10px] font-sans px-2 py-1"
+                />
+                <input
+                  type="text"
+                  value={ytTitle}
+                  onChange={(e) => setYtTitle(e.target.value)}
+                  placeholder="Title (optional)"
+                  className="pixel-input text-[10px] font-sans px-2 py-1"
+                />
+                <div className="flex gap-1">
+                  <button
+                    onClick={handleAddYoutube}
+                    disabled={!parseYouTubeId(ytUrl.trim())}
+                    className="pixel-btn pixel-btn--primary flex-1 text-[10px] py-1"
+                  >
+                    Add link
+                  </button>
+                  <button
+                    onClick={() => {
+                      setShowYt(false);
+                      setYtUrl('');
+                      setYtTitle('');
+                    }}
+                    className="pixel-btn text-[10px] px-2 py-1"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button onClick={() => setShowYt(true)} className="pixel-btn text-[10px] font-sans py-1.5">
+                ＋ YouTube link
+              </button>
+            )}
           </div>
 
-          {currentSong && (
+          {currentSong && !currentIsYT && (
             <audio ref={audioRef} src={currentSong.file_url} onEnded={() => skipSong(1)} autoPlay={isPlaying} />
           )}
-        </div>
       </div>
     </div>
   );

@@ -5,13 +5,16 @@ const isDev = !app.isPackaged;
 let overlayWindow: BrowserWindow | null = null;
 
 export function createPetOverlayWindow(): BrowserWindow {
-  const { width, height } = screen.getPrimaryDisplay().bounds;
+  // Explicitly use the display Windows reports as primary — on multi-monitor
+  // setups with a non-primary "main" monitor, this matters a lot.
+  const display = screen.getPrimaryDisplay();
+  const { x, y, width, height } = display.bounds;
 
   const win = new BrowserWindow({
     width,
     height,
-    x: 0,
-    y: 0,
+    x,
+    y,
     frame: false,
     transparent: true,
     resizable: false,
@@ -19,6 +22,7 @@ export function createPetOverlayWindow(): BrowserWindow {
     alwaysOnTop: true,
     focusable: false,
     hasShadow: false,
+    type: 'toolbar',
     webPreferences: {
       preload: path.join(__dirname, '../../preload/index.js'),
       contextIsolation: true,
@@ -29,8 +33,9 @@ export function createPetOverlayWindow(): BrowserWindow {
   });
 
   win.setIgnoreMouseEvents(true, { forward: true });
-  win.setAlwaysOnTop(true, 'screen-saver');
+  win.setAlwaysOnTop(true, 'screen-saver', 1);
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  win.setFullScreenable(false);
 
   if (isDev) {
     win.loadURL('http://localhost:5173/pet-overlay.html');
@@ -43,6 +48,14 @@ export function createPetOverlayWindow(): BrowserWindow {
   });
 
   overlayWindow = win;
+
+  setInterval(() => {
+    if (overlayWindow && !overlayWindow.isDestroyed()) {
+      overlayWindow.setAlwaysOnTop(true, 'screen-saver', 1);
+      overlayWindow.moveTop();
+    }
+  }, 250);
+
   return win;
 }
 
@@ -56,9 +69,8 @@ export function getPetOverlayWindow(): BrowserWindow | null {
 
 export function setOverlayMode(mode: 'full' | 'semi' | 'none'): void {
   if (!overlayWindow) return;
-  
   if (mode === 'full') {
-    overlayWindow.setAlwaysOnTop(true, 'screen-saver');
+    overlayWindow.setAlwaysOnTop(true, 'screen-saver', 1);
     overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   } else if (mode === 'semi') {
     overlayWindow.setAlwaysOnTop(true, 'floating');

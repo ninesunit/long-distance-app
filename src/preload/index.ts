@@ -11,6 +11,12 @@ const IPC = {
   PET_SETTINGS_CHANGED: 'pet:settings-changed',
   GET_PET_SETTINGS: 'pet:get-settings',
   SET_PET_INTERACTIVE: 'pet:set-interactive',
+  PET_HITBOX_DOWN: 'pet:hitbox-down',
+  PET_HITBOX_MOVE: 'pet:hitbox-move',
+  PET_HITBOX_UP: 'pet:hitbox-up',
+  PET_MOVE_HITBOX: 'pet:move-hitbox',
+  SPAWN_TREAT: 'pet:spawn-treat',
+
 } as const;
 
 interface ToastPayload {
@@ -22,8 +28,9 @@ interface ToastPayload {
 }
 
 interface PetSettings {
-  taskbarOffset: number;
   catSize: number;
+  overlayMode: 'full' | 'semi' | 'none';
+  bottomOffset: number;
 }
 
 const api = {
@@ -32,25 +39,52 @@ const api = {
   onToastRelay: (callback: (payload: ToastPayload) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, payload: ToastPayload) => callback(payload);
     ipcRenderer.on(IPC.RELAY_TO_TOAST, listener);
-    return () => ipcRenderer.removeListener(IPC.RELAY_TO_TOAST, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC.RELAY_TO_TOAST, listener);
+    };
   },
-  toggleWindow: (name: 'pet' | 'note' | 'lamp' | 'settings') => ipcRenderer.send(IPC.TOGGLE_WINDOW, name),
+  toggleWindow: (name: 'pet' | 'note' | 'lamp' | 'settings' | 'game') => ipcRenderer.send(IPC.TOGGLE_WINDOW, name),
   resizeDock: (width: number, height: number) => ipcRenderer.send('window:resize-dock', width, height),
   hideAllPopups: () => ipcRenderer.send(IPC.HIDE_ALL_POPUPS),
   notifyAuthChanged: () => ipcRenderer.send(IPC.AUTH_CHANGED),
   onPopupShown: (callback: () => void) => {
     const listener = () => callback();
     ipcRenderer.on(IPC.POPUP_SHOWN, listener);
-    return () => ipcRenderer.removeListener(IPC.POPUP_SHOWN, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC.POPUP_SHOWN, listener);
+    };
   },
   setPetSettings: (settings: PetSettings) => ipcRenderer.send(IPC.PET_SETTINGS_CHANGED, settings),
   onPetSettingsChanged: (callback: (settings: PetSettings) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, settings: PetSettings) => callback(settings);
     ipcRenderer.on(IPC.PET_SETTINGS_CHANGED, listener);
-    return () => ipcRenderer.removeListener(IPC.PET_SETTINGS_CHANGED, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC.PET_SETTINGS_CHANGED, listener);
+    };
   },
   getPetSettings: (): Promise<PetSettings> => ipcRenderer.invoke(IPC.GET_PET_SETTINGS),
   setPetInteractive: (interactive: boolean) => ipcRenderer.send(IPC.SET_PET_INTERACTIVE, interactive),
+
+  spawnTreat: () => ipcRenderer.send(IPC.SPAWN_TREAT),
+  onSpawnTreat: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on(IPC.SPAWN_TREAT, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC.SPAWN_TREAT, listener);
+    };
+  },
+
+  notifyPetHitboxDown: (clientX: number, clientY: number, screenX: number, screenY: number) =>
+    ipcRenderer.send(IPC.PET_HITBOX_DOWN, { clientX, clientY, screenX, screenY }),
+  movePetHitbox: (x: number, y: number, size: number) => ipcRenderer.send(IPC.PET_MOVE_HITBOX, { x, y, size }),
+  onHitboxDown: (callback: (screenX: number, screenY: number) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, data: { screenX: number; screenY: number }) =>
+      callback(data.screenX, data.screenY);
+    ipcRenderer.on(IPC.PET_HITBOX_DOWN, listener);
+    return () => {
+      ipcRenderer.removeListener(IPC.PET_HITBOX_DOWN, listener);
+    };
+  },
 };
 
 contextBridge.exposeInMainWorld('api', api);

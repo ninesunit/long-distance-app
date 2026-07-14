@@ -26,7 +26,16 @@ export async function uploadSong(
   title: string
 ): Promise<Song | null> {
   const coupleKey = getCoupleKey(userId, partnerId);
-  const filePath = `${coupleKey}/${Date.now()}-${file.name}`;
+
+  // Storage keys must be ASCII-safe — strip/replace anything that isn't a
+  // safe filename character, but keep the file extension intact. The
+  // display TITLE (below) can still contain any characters since that's
+  // just stored as text in the database, not used as a file path.
+  const extMatch = file.name.match(/\.[^.]+$/);
+  const ext = extMatch ? extMatch[0] : '.mp3';
+  const safeName = `${Date.now()}${ext}`;
+
+  const filePath = `${coupleKey}/${safeName}`;
 
   const { error: uploadError } = await supabase.storage.from('songs').upload(filePath, file);
   if (uploadError) {
@@ -55,12 +64,64 @@ export async function uploadSong(
   return data as Song;
 }
 
+export function parseYouTubeId(url: string): string | null {
+  const m = url.match(/(?:youtube\.com\/(?:watch\?v=|embed\/|shorts\/)|youtu\.be\/)([A-Za-z0-9_-]{11})/);
+  return m ? m[1] : null;
+}
+
+export function isYouTubeUrl(url: string): boolean {
+  return /(?:youtube\.com|youtu\.be)/.test(url);
+}
+
+// Add a YouTube link as a "song" row (no storage upload; file_url IS the link).
+export async function addYoutubeSong(
+  userId: string,
+  partnerId: string,
+  url: string,
+  title: string
+): Promise<Song | null> {
+  const coupleKey = getCoupleKey(userId, partnerId);
+  const { data, error } = await supabase
+    .from('songs')
+    .insert({ couple_key: coupleKey, title: title || 'YouTube', file_url: url, uploaded_by: userId })
+    .select()
+    .single();
+  if (error) {
+    console.error('Failed to add YouTube song:', error.message);
+    return null;
+  }
+  return data as Song;
+}
+
 export async function deleteSong(songId: string): Promise<boolean> {
+  const { data: song, error: fetchError } = await supabase
+    .from('songs')
+    .select('file_url')
+    .eq('id', songId)
+    .maybeSingle();
+
+  if (fetchError) {
+    console.error('Failed to fetch song before delete:', fetchError.message);
+  }
+
   const { error } = await supabase.from('songs').delete().eq('id', songId);
   if (error) {
     console.error('Failed to delete song:', error.message);
     return false;
   }
+
+  if (song?.file_url) {
+    const marker = '/storage/v1/object/public/songs/';
+    const idx = song.file_url.indexOf(marker);
+    if (idx !== -1) {
+      const storagePath = song.file_url.slice(idx + marker.length);
+      const { error: removeError } = await supabase.storage.from('songs').remove([storagePath]);
+      if (removeError) {
+        console.error('Failed to remove storage file:', removeError.message);
+      }
+    }
+  }
+
   return true;
 }
 

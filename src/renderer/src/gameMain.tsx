@@ -1,9 +1,9 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import SettingsPopup from './features/settings/SettingsPopup';
+import GamePopup from './features/game/GamePopup';
 import ErrorBoundary from './components/ErrorBoundary';
 import './styles/index.css';
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode><ErrorBoundary><SettingsPopup /></ErrorBoundary></React.StrictMode>
+  <React.StrictMode><ErrorBoundary><GamePopup /></ErrorBoundary></React.StrictMode>
 );

@@ -71,6 +71,24 @@ export interface PetPositionPayload {
   x: number;
   y: number;
   facingLeft: boolean;
-  state: 'roam' | 'drag' | 'fall' | 'idle';
+  state: 'roam' | 'run' | 'drag' | 'fall' | 'idle';
   actorId: string;
 }
+
+export interface NeedsBroadcastPayload {
+  fullness: number;
+  happiness: number;
+  experience: number;
+  stage: number;
+  updatedAt: string;
+  actorId: string;
+}
+
+// "Treat Catch" mini-game. In both Solo and Versus each player runs their own
+// board locally, so the only thing that crosses the wire is match control +
+// live scores. Discriminated on `kind`.
+export type GameSignal =
+  | { kind: 'versus_ready'; actorId: string } // in the versus lobby, heartbeat
+  | { kind: 'versus_go'; startAt: number; roundSeconds: number; hostId: string }
+  | { kind: 'score'; score: number; finished: boolean; actorId: string }
+  | { kind: 'cancel'; actorId: string };

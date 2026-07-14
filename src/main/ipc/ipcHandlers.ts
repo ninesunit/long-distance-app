@@ -14,9 +14,10 @@ const IPC = {
   PET_SETTINGS_CHANGED: 'pet:settings-changed',
   GET_PET_SETTINGS: 'pet:get-settings',
   SET_PET_INTERACTIVE: 'pet:set-interactive',
+  SPAWN_TREAT: 'pet:spawn-treat',
 } as const;
 
-let petSettings = { taskbarOffset: -10, catSize: 64, overlayMode: 'semi' as 'full' | 'semi' | 'none' };
+let petSettings = { catSize: 64, overlayMode: 'semi' as 'full' | 'semi' | 'none', bottomOffset: -15 };
 
 export function registerIpcHandlers(): void {
   ipcMain.on(IPC.SHOW_TOAST, (_e, payload) => {
@@ -46,11 +47,14 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC.GET_PET_SETTINGS, () => petSettings);
 
-  // Toggle click-through on/off for the pet overlay based on whether the
-  // cursor is currently over the cat sprite (renderer tells us via hit-test)
   ipcMain.on(IPC.SET_PET_INTERACTIVE, (_e, interactive: boolean) => {
     const overlay = getPetOverlayWindow();
     if (!overlay) return;
     overlay.setIgnoreMouseEvents(!interactive, { forward: true });
+  });
+
+  // Pet popup asks THIS user's overlay to spawn a draggable treat.
+  ipcMain.on(IPC.SPAWN_TREAT, () => {
+    getPetOverlayWindow()?.webContents.send(IPC.SPAWN_TREAT);
   });
 }

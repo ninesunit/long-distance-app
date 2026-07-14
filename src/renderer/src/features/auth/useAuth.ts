@@ -98,5 +98,10 @@ export function useAuth() {
     window.api.notifyAuthChanged();
   }, [state.session, fetchProfile]);
 
-  return { ...state, signUp, signIn, signOut, refreshProfile };
+  const resetPassword = useCallback(async (email: string) => {
+    const { error } = await supabase.auth.resetPasswordForEmail(email);
+    return { error: error?.message ?? null };
+  }, []);
+
+  return { ...state, signUp, signIn, signOut, refreshProfile, resetPassword };
 }

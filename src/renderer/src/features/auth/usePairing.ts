@@ -30,10 +30,5 @@ export function usePairing() {
   }
 }, []);
 
-const resetPassword = useCallback(async (email: string) => {
-  const { error } = await supabase.auth.resetPasswordForEmail(email);
-  return { error: error?.message ?? null };
-}, []);
-
-  return { pairWithPartner, unpair, pairing, resetPassword };
+  return { pairWithPartner, unpair, pairing };
 }

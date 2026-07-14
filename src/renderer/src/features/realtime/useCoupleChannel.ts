@@ -9,6 +9,8 @@ import type {
   MusicBroadcastPayload,
   NoteDeletedPayload,
   PetPositionPayload,
+  NeedsBroadcastPayload,
+  GameSignal,
 } from '../../../../shared/types';
 
 function getCoupleChannelName(userId: string, partnerId: string): string {
@@ -24,9 +26,18 @@ interface Handlers {
   onStatusChanged?: (payload: StatusBroadcastPayload) => void;
   onMusicUpdate?: (payload: MusicBroadcastPayload) => void;
   onPetPosition?: (payload: PetPositionPayload) => void;
+  onNeedsUpdate?: (payload: NeedsBroadcastPayload) => void;
+  onGameSignal?: (payload: GameSignal) => void;
+  onPartnerOnline?: () => void;
+  onPinsChanged?: () => void;
 }
 
-export function useCoupleChannel(userId: string | undefined, partnerId: string | undefined, handlers: Handlers) {
+export function useCoupleChannel(
+  userId: string | undefined,
+  partnerId: string | undefined,
+  handlers: Handlers,
+  options?: { trackPresence?: boolean }
+) {
   const channelRef = useRef<RealtimeChannel | null>(null);
   const [connected, setConnected] = useState(false);
 
@@ -44,10 +55,25 @@ export function useCoupleChannel(userId: string | undefined, partnerId: string |
       config: {
         broadcast: { self: false },
         private: true,
+        // Only enable presence on the window that actually tracks it (the pet
+        // overlay). Enabling it everywhere put presence on every popup channel
+        // (and the double-subscribed LampGlow), which needs presence RLS to
+        // succeed and can otherwise error the channel.
+        ...(options?.trackPresence ? { presence: { key: userId } } : {}),
       },
     });
 
+    // Grace window so the initial presence sync (partner already online) doesn't
+    // fire a "welcome home" on our own launch — only genuine later joins do.
+    let presenceReady = false;
+    const graceTimer = setTimeout(() => {
+      presenceReady = true;
+    }, 4000);
+
     channel
+      .on('presence', { event: 'join' }, ({ key }) => {
+        if (presenceReady && key === partnerId) handlersRef.current.onPartnerOnline?.();
+      })
       .on('broadcast', { event: 'lamp_update' }, ({ payload }) => {
         handlersRef.current.onLampUpdate?.(payload as LampBroadcastPayload);
       })
@@ -69,16 +95,30 @@ export function useCoupleChannel(userId: string | undefined, partnerId: string |
       .on('broadcast', { event: 'pet_position' }, ({ payload }) => {
         handlersRef.current.onPetPosition?.(payload as PetPositionPayload);
       })
+      .on('broadcast', { event: 'needs_update' }, ({ payload }) => {
+        handlersRef.current.onNeedsUpdate?.(payload as NeedsBroadcastPayload);
+      })
+      .on('broadcast', { event: 'game_signal' }, ({ payload }) => {
+        handlersRef.current.onGameSignal?.(payload as GameSignal);
+      })
+      .on('broadcast', { event: 'pins_changed' }, () => {
+        handlersRef.current.onPinsChanged?.();
+      })
       .subscribe((status) => {
         setConnected(status === 'SUBSCRIBED');
+        if (status === 'SUBSCRIBED' && options?.trackPresence) {
+          channel.track({ userId, at: Date.now() });
+        }
       });
 
     channelRef.current = channel;
 
     return () => {
+      clearTimeout(graceTimer);
       supabase.removeChannel(channel);
       channelRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, partnerId]);
 
   const sendLampUpdate = useCallback((payload: LampBroadcastPayload) => {
@@ -109,6 +149,18 @@ export function useCoupleChannel(userId: string | undefined, partnerId: string |
     channelRef.current?.send({ type: 'broadcast', event: 'pet_position', payload });
   }, []);
 
+  const sendNeedsUpdate = useCallback((payload: NeedsBroadcastPayload) => {
+    channelRef.current?.send({ type: 'broadcast', event: 'needs_update', payload });
+  }, []);
+
+  const sendGameSignal = useCallback((payload: GameSignal) => {
+    channelRef.current?.send({ type: 'broadcast', event: 'game_signal', payload });
+  }, []);
+
+  const sendPinsChanged = useCallback(() => {
+    channelRef.current?.send({ type: 'broadcast', event: 'pins_changed', payload: {} });
+  }, []);
+
   return {
     connected,
     sendLampUpdate,
@@ -118,5 +170,8 @@ export function useCoupleChannel(userId: string | undefined, partnerId: string |
     sendStatusChanged,
     sendMusicUpdate,
     sendPetPosition,
+    sendNeedsUpdate,
+    sendGameSignal,
+    sendPinsChanged,
   };
 }

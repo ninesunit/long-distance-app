@@ -4,3 +4,7 @@ node_modules/
 dist/
 release/
 
+# Stray game-save data that got dropped into build/ — not part of the app
+build/99A26F6746B3FE7661CE56969B67047B/
+*.sav
+
