@@ -12,6 +12,9 @@ import {
   type PetNeeds,
 } from '../../lib/needsStore';
 import { LampGlowLayer } from '../../components/LampGlow';
+import { SANDBOX, type SandboxCategory, type SandboxDef } from '../../lib/sandboxCatalog';
+import { fetchPins, removePinsByEmoji, clearPins } from '../../lib/pinsStore';
+import { playSweep } from '../../lib/catSounds';
 import type { PetBroadcastPayload, NeedsBroadcastPayload } from '../../../../shared/types';
 
 function NeedBar({ label, value, fill }: { label: string; value: number; fill: string }) {
@@ -34,13 +37,20 @@ export default function PetPopup() {
   const [nameInput, setNameInput] = useState('');
   const [lastEvent, setLastEvent] = useState<string | null>(null);
   const [needs, setNeeds] = useState<PetNeeds | null>(null);
+  const [showStickers, setShowStickers] = useState(false);
+  const [activeStickers, setActiveStickers] = useState<Set<string>>(new Set()); // emojis currently on the desktop
   const [, setTick] = useState(0);
   const [lampGlow, setLampGlow] = useState(0);
   const lampIntensitiesRef = useRef<Record<string, number>>({});
   const petNameRef = useRef(petName);
   petNameRef.current = petName;
 
-  const { sendPetInteraction, sendNeedsUpdate } = useCoupleChannel(profile?.id, profile?.partner_id ?? undefined, {
+  const loadPins = () => {
+    if (!profile?.partner_id) return;
+    fetchPins(profile.id, profile.partner_id).then((pins) => setActiveStickers(new Set(pins.map((p) => p.emoji))));
+  };
+
+  const { sendPetInteraction, sendNeedsUpdate, sendPinsChanged } = useCoupleChannel(profile?.id, profile?.partner_id ?? undefined, {
     onPetInteraction: (payload: PetBroadcastPayload) => {
       const verb = payload.interactionType === 'feed' ? 'fed' : 'petted';
       setLastEvent(`${payload.actorName} ${verb} ${petNameRef.current}`);
@@ -51,6 +61,8 @@ export default function PetPopup() {
       setNeeds({
         fullness: payload.fullness,
         happiness: payload.happiness,
+        energy: payload.energy,
+        thirst: payload.thirst,
         experience: payload.experience,
         stage: payload.stage,
         updated_at: payload.updatedAt,
@@ -60,6 +72,7 @@ export default function PetPopup() {
       lampIntensitiesRef.current[p.holderId] = p.intensity;
       setLampGlow(Math.max(0, ...Object.values(lampIntensitiesRef.current)));
     },
+    onPinsChanged: () => loadPins(),
   });
 
   const loadNeeds = () => {
@@ -74,12 +87,16 @@ export default function PetPopup() {
       setPetGenderState(data.pet_gender);
     });
     loadNeeds();
+    loadPins();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile]);
 
   // Refresh when the popup is (re)shown, and tick so the bars visibly decay.
   useEffect(() => {
-    const unsub = window.api.onPopupShown(() => loadNeeds());
+    const unsub = window.api.onPopupShown(() => {
+      loadNeeds();
+      loadPins();
+    });
     const interval = window.setInterval(() => setTick((t) => t + 1), 4000);
     return () => {
       unsub();
@@ -104,6 +121,8 @@ export default function PetPopup() {
     sendNeedsUpdate({
       fullness: updated.fullness,
       happiness: updated.happiness,
+      energy: updated.energy,
+      thirst: updated.thirst,
       experience: updated.experience,
       stage: updated.stage,
       updatedAt: updated.updated_at,
@@ -123,6 +142,38 @@ export default function PetPopup() {
     if (!profile.partner_id) return;
     setPetGenderState(gender);
     await setPetGender(profile.id, profile.partner_id, gender);
+  };
+
+  // Treats drop every click; everything else toggles on/off.
+  const handlePickSticker = async (def: SandboxDef) => {
+    if (!profile.partner_id) return;
+    if (def.spammable) {
+      window.api.spawnSticker(def.emoji, def.category);
+      setLastEvent(`Dropped ${def.label} 🐾`);
+      return;
+    }
+    if (activeStickers.has(def.emoji)) {
+      setActiveStickers((prev) => {
+        const n = new Set(prev);
+        n.delete(def.emoji);
+        return n;
+      });
+      await removePinsByEmoji(profile.id, profile.partner_id, def.emoji);
+      sendPinsChanged();
+    } else {
+      setActiveStickers((prev) => new Set(prev).add(def.emoji));
+      window.api.spawnSticker(def.emoji, def.category);
+      setLastEvent(`Dropped ${def.label} 🐾`);
+    }
+  };
+
+  const handleClearStickers = async () => {
+    if (!profile.partner_id) return;
+    playSweep();
+    setActiveStickers(new Set());
+    await clearPins(profile.id, profile.partner_id);
+    sendPinsChanged();
+    setLastEvent('Cleared the desktop ✨');
   };
 
   return (
@@ -171,6 +222,8 @@ export default function PetPopup() {
           <div className="w-full flex flex-col gap-1.5 px-1">
             <NeedBar label="🍖" value={shown.fullness} fill={isHungry ? '#e24b4a' : '#ff8a5b'} />
             <NeedBar label="💗" value={shown.happiness} fill="#d4537e" />
+            <NeedBar label="⚡" value={shown.energy} fill="#f2b705" />
+            <NeedBar label="💧" value={shown.thirst} fill="#4aa8e2" />
             <div className="w-full flex items-center gap-1.5">
               <span className="font-pixel text-[8px] text-ink w-8 flex-shrink-0">
                 Lv{shown.stage}
@@ -211,19 +264,16 @@ export default function PetPopup() {
           {isHungry ? `${petName} is hungry!` : lastEvent ?? `${petName} is roaming your desktop!`}
         </p>
 
-        <div className="flex gap-2">
-          <button
-            onClick={() => {
-              window.api.spawnTreat();
-              window.api.hideAllPopups();
-            }}
-            className="pixel-btn pixel-btn--pink text-[10px] px-3 py-1.5"
-            title="Drag the treat onto the cat"
-          >
-            🍖 Feed
-          </button>
+        <div className="flex items-center gap-2">
           <button onClick={() => handleInteract('pet')} className="pixel-btn pixel-btn--accent text-[10px] px-3 py-1.5">
             ✋ Pet
+          </button>
+          <button
+            onClick={() => setShowStickers(true)}
+            className="pixel-btn pixel-btn--pink text-[10px] px-3 py-1.5"
+            title="Drop treats & toys onto your desktop"
+          >
+            🧺 Toys
           </button>
         </div>
 
@@ -234,7 +284,105 @@ export default function PetPopup() {
         >
           🎮 Play together
         </button>
+
+        {showStickers && (
+          <StickerTray
+            petName={petName}
+            active={activeStickers}
+            onPick={handlePickSticker}
+            onClear={handleClearStickers}
+            onClose={() => setShowStickers(false)}
+          />
+        )}
       </div>
+    </div>
+  );
+}
+
+// A tray button's face: a pixel-art icon if one exists, else the emoji. If the
+// icon file is missing the <img> errors out and we fall back to the emoji.
+function StickerIcon({ def }: { def: SandboxDef }) {
+  const [failed, setFailed] = useState(false);
+  if (def.icon && !failed) {
+    return (
+      <img
+        src={def.icon}
+        alt={def.label}
+        className="w-5 h-5 pixel-art"
+        draggable={false}
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  return <span>{def.emoji}</span>;
+}
+
+// The "sandbox" tray — treats drop every click; toys/cozy/chaos toggle on & off.
+function StickerTray({
+  petName,
+  active,
+  onPick,
+  onClear,
+  onClose,
+}: {
+  petName: string;
+  active: Set<string>;
+  onPick: (def: SandboxDef) => void;
+  onClear: () => void;
+  onClose: () => void;
+}) {
+  const groups: { key: SandboxCategory; label: string }[] = [
+    { key: 'consumable', label: '🍱 Treats · click to drop' },
+    { key: 'cozy', label: '🛋️ Cozy · toggle' },
+    { key: 'toy', label: '🧸 Toys · toggle' },
+    { key: 'chaos', label: '🌪️ Chaos · toggle' },
+  ];
+  return (
+    <div className="absolute inset-0 z-20 bg-paper/95 flex flex-col p-2.5 no-drag">
+      <div className="flex items-center justify-between mb-1">
+        <p className="font-pixel text-[9px] text-ink">🧺 Toys & Treats</p>
+        <button onClick={onClose} className="font-pixel text-[10px] text-ink-soft hover:text-ink" title="Close">
+          ✕
+        </button>
+      </div>
+      <p className="text-[8px] text-ink-soft mb-1.5 leading-snug">
+        Drop treats for {petName} to eat. Toys stay put — drag them anywhere on your desktop.
+      </p>
+      <div className="flex-1 overflow-y-auto flex flex-col gap-1.5 pr-1">
+        {groups.map((g) => {
+          const items = SANDBOX.filter((s) => s.category === g.key);
+          if (items.length === 0) return null;
+          return (
+            <div key={g.key}>
+              <p className="font-pixel text-[7px] text-ink-soft mb-0.5">{g.label}</p>
+              <div className="flex flex-wrap gap-1">
+                {items.map((s) => {
+                  const on = !s.spammable && active.has(s.emoji);
+                  return (
+                    <button
+                      key={s.emoji}
+                      onClick={() => onPick(s)}
+                      title={s.hint}
+                      className={`w-7 h-7 border-2 flex items-center justify-center text-sm shadow-pixel-btn-sm hover:-translate-y-0.5 active:translate-y-0.5 active:shadow-none transition-all ${
+                        on ? 'border-campfire bg-blush' : 'border-ink bg-cozy'
+                      }`}
+                    >
+                      <StickerIcon def={s} />
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <button
+        onClick={onClear}
+        className="pixel-btn text-[9px] px-3 py-1 mt-1.5 self-center"
+        title="Remove every sticker from the desktop"
+      >
+        🧹 Clear all
+      </button>
     </div>
   );
 }

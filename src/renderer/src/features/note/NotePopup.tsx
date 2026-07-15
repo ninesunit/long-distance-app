@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../auth/useAuth';
 import { useCoupleChannel } from '../realtime/useCoupleChannel';
 import { supabase } from '../../lib/supabaseClient';
-import { fetchPins, addPin, removePin, STICKERS, type Pin } from '../../lib/pinsStore';
 import { LampGlowLayer } from '../../components/LampGlow';
 
 interface NoteRow {
@@ -38,15 +37,9 @@ export default function NotePopup() {
   const [content, setContent] = useState('');
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [pins, setPins] = useState<Pin[]>([]);
   const [lampGlow, setLampGlow] = useState(0);
   const lampIntensitiesRef = useRef<Record<string, number>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  const loadPins = useCallback(() => {
-    if (!profile?.partner_id) return;
-    fetchPins(profile.id, profile.partner_id).then(setPins);
-  }, [profile]);
 
   const loadHistory = useCallback(async () => {
     if (!profile?.partner_id) return;
@@ -87,13 +80,12 @@ export default function NotePopup() {
     }
   }, [profile]);
 
-  const { sendNoteSent, sendNoteDeleted, sendPinsChanged } = useCoupleChannel(
+  const { sendNoteSent, sendNoteDeleted } = useCoupleChannel(
     profile?.id,
     profile?.partner_id ?? undefined,
     {
       onNoteSent: () => loadHistory(),
       onNoteDeleted: () => loadHistory(),
-      onPinsChanged: () => loadPins(),
       onLampUpdate: (p) => {
         lampIntensitiesRef.current[p.holderId] = p.intensity;
         setLampGlow(Math.max(0, ...Object.values(lampIntensitiesRef.current)));
@@ -103,16 +95,14 @@ export default function NotePopup() {
 
   useEffect(() => {
     loadHistory();
-    loadPins();
-  }, [loadHistory, loadPins]);
+  }, [loadHistory]);
 
   useEffect(() => {
     const unsubscribe = window.api.onPopupShown(() => {
       loadHistory();
-      loadPins();
     });
     return unsubscribe;
-  }, [loadHistory, loadPins]);
+  }, [loadHistory]);
 
   useEffect(() => {
     if (!profile?.partner_id) return;
@@ -160,26 +150,6 @@ export default function NotePopup() {
     sendNoteDeleted({ noteId });
   };
 
-  const handleAddPin = async (emoji: string) => {
-    if (!profile.partner_id) return;
-    // Drop into the cozy lower band of the screen so pins hang out near the cat.
-    const x = 0.08 + Math.random() * 0.84;
-    const y = 0.72 + Math.random() * 0.18;
-    const pin = await addPin(profile.id, profile.partner_id, emoji, x, y);
-    if (pin) {
-      setPins((prev) => [...prev, pin]);
-      sendPinsChanged();
-    }
-  };
-
-  const handleRemovePin = async (pinId: string) => {
-    const ok = await removePin(pinId);
-    if (ok) {
-      setPins((prev) => prev.filter((p) => p.id !== pinId));
-      sendPinsChanged();
-    }
-  };
-
   return (
     <div className="w-full h-full relative p-3 font-sans">
       <div className="drag-region absolute top-0 left-0 w-full h-5" />
@@ -188,37 +158,6 @@ export default function NotePopup() {
         <div className="flex items-center gap-1.5">
           <img src="./sprites/pixel_letter.gif" className="w-5 h-5 pixel-art" alt="notes" />
           <p className="font-pixel text-[10px] text-ink">Notes</p>
-        </div>
-
-        {/* Shared wall — pin cute stickers onto your partner's desktop */}
-        <div className="pixel-panel p-1.5 flex flex-col gap-1">
-          <p className="font-pixel text-[8px] text-ink-soft">📌 Pin a sticker to your desktop</p>
-          <div className="flex flex-wrap gap-0.5">
-            {STICKERS.map((s) => (
-              <button
-                key={s}
-                onClick={() => handleAddPin(s)}
-                className="text-sm leading-none w-5 h-5 flex items-center justify-center hover:scale-125 transition"
-                title="Pin this"
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-          {pins.length > 0 && (
-            <div className="flex flex-wrap gap-0.5 border-t border-ink/15 pt-1">
-              {pins.map((p) => (
-                <button
-                  key={p.id}
-                  onClick={() => handleRemovePin(p.id)}
-                  className="text-sm leading-none w-5 h-5 flex items-center justify-center hover:opacity-40 transition"
-                  title="Remove pin"
-                >
-                  {p.emoji}
-                </button>
-              ))}
-            </div>
-          )}
         </div>
 
         <div ref={scrollRef} className="flex-1 overflow-y-auto flex flex-col gap-2 min-h-0 pr-1">

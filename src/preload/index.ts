@@ -15,7 +15,7 @@ const IPC = {
   PET_HITBOX_MOVE: 'pet:hitbox-move',
   PET_HITBOX_UP: 'pet:hitbox-up',
   PET_MOVE_HITBOX: 'pet:move-hitbox',
-  SPAWN_TREAT: 'pet:spawn-treat',
+  SPAWN_STICKER: 'pet:spawn-sticker',
 
 } as const;
 
@@ -65,12 +65,34 @@ const api = {
   getPetSettings: (): Promise<PetSettings> => ipcRenderer.invoke(IPC.GET_PET_SETTINGS),
   setPetInteractive: (interactive: boolean) => ipcRenderer.send(IPC.SET_PET_INTERACTIVE, interactive),
 
-  spawnTreat: () => ipcRenderer.send(IPC.SPAWN_TREAT),
-  onSpawnTreat: (callback: () => void) => {
-    const listener = () => callback();
-    ipcRenderer.on(IPC.SPAWN_TREAT, listener);
+  // Ask THIS user's overlay to spawn a draggable sticker to place on the desktop.
+  spawnSticker: (emoji: string, kind: string) => ipcRenderer.send(IPC.SPAWN_STICKER, { emoji, kind }),
+  onSpawnSticker: (callback: (emoji: string, kind: string) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, payload: { emoji: string; kind: string }) =>
+      callback(payload.emoji, payload.kind);
+    ipcRenderer.on(IPC.SPAWN_STICKER, listener);
     return () => {
-      ipcRenderer.removeListener(IPC.SPAWN_TREAT, listener);
+      ipcRenderer.removeListener(IPC.SPAWN_STICKER, listener);
+    };
+  },
+
+  // --- Auto-update (manual control from Settings) ---
+  checkForUpdate: (): Promise<{ state: 'dev' | 'checked' | 'error' }> => ipcRenderer.invoke('update:check'),
+  downloadUpdate: () => ipcRenderer.send('update:download'),
+  installUpdate: () => ipcRenderer.send('update:install'),
+  onUpdateStatus: (
+    callback: (s: { state: 'available' | 'none' | 'downloading' | 'downloaded' | 'error'; version?: string; percent?: number; message?: string }) => void
+  ) => {
+    const handlers: Record<string, (e: Electron.IpcRendererEvent, d: any) => void> = {
+      'update:available': (_e, d) => callback({ state: 'available', version: d?.version }),
+      'update:none': () => callback({ state: 'none' }),
+      'update:progress': (_e, d) => callback({ state: 'downloading', percent: d?.percent }),
+      'update:downloaded': (_e, d) => callback({ state: 'downloaded', version: d?.version }),
+      'update:error': (_e, d) => callback({ state: 'error', message: d?.message }),
+    };
+    for (const [ch, fn] of Object.entries(handlers)) ipcRenderer.on(ch, fn);
+    return () => {
+      for (const [ch, fn] of Object.entries(handlers)) ipcRenderer.removeListener(ch, fn);
     };
   },
 

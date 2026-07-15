@@ -161,6 +161,8 @@ export default function GamePopup() {
       sendNeedsUpdate({
         fullness: updated.fullness,
         happiness: updated.happiness,
+        energy: updated.energy,
+        thirst: updated.thirst,
         experience: updated.experience,
         stage: updated.stage,
         updatedAt: updated.updated_at,
@@ -190,6 +192,8 @@ export default function GamePopup() {
         sendNeedsUpdate({
           fullness: updated.fullness,
           happiness: updated.happiness,
+          energy: updated.energy,
+          thirst: updated.thirst,
           experience: updated.experience,
           stage: updated.stage,
           updatedAt: updated.updated_at,

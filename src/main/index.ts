@@ -10,6 +10,19 @@ import { startRendererServer } from './staticServer';
 
 let dockWindow: BrowserWindow | null = null;
 
+// Only ever one copy running. Two instances (e.g. the launch-at-login copy plus
+// a manual reopen) would lock each other's files and make the auto-update
+// installer fail with "failed to delete old version".
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (dockWindow && !dockWindow.isDestroyed()) {
+      dockWindow.show();
+      dockWindow.focus();
+    }
+  });
+
 app.whenReady().then(async () => {
   app.setLoginItemSettings({
     openAtLogin: true,
@@ -49,3 +62,4 @@ app.on('window-all-closed', () => {});
 app.on('before-quit', () => {
   (app as any).isQuitting = true;
 });
+}

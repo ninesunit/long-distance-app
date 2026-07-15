@@ -10,6 +10,7 @@ import type {
   NoteDeletedPayload,
   PetPositionPayload,
   NeedsBroadcastPayload,
+  PetReactionPayload,
   GameSignal,
 } from '../../../../shared/types';
 
@@ -27,6 +28,7 @@ interface Handlers {
   onMusicUpdate?: (payload: MusicBroadcastPayload) => void;
   onPetPosition?: (payload: PetPositionPayload) => void;
   onNeedsUpdate?: (payload: NeedsBroadcastPayload) => void;
+  onPetReaction?: (payload: PetReactionPayload) => void;
   onGameSignal?: (payload: GameSignal) => void;
   onPartnerOnline?: () => void;
   onPinsChanged?: () => void;
@@ -41,6 +43,9 @@ export function useCoupleChannel(
 ) {
   const channelRef = useRef<RealtimeChannel | null>(null);
   const [connected, setConnected] = useState(false);
+  // Whether the partner is currently online (only meaningful when trackPresence
+  // is enabled). Lets features fall back to solo behaviour when alone.
+  const [partnerPresent, setPartnerPresent] = useState(false);
 
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
@@ -48,6 +53,7 @@ export function useCoupleChannel(
   useEffect(() => {
     if (!userId || !partnerId) {
       setConnected(false);
+      setPartnerPresent(false);
       return;
     }
 
@@ -71,9 +77,19 @@ export function useCoupleChannel(
       presenceReady = true;
     }, 4000);
 
+    const syncPartnerPresence = () => {
+      const state = channel.presenceState();
+      setPartnerPresent(Object.keys(state).includes(partnerId));
+    };
+
     channel
+      .on('presence', { event: 'sync' }, syncPartnerPresence)
       .on('presence', { event: 'join' }, ({ key }) => {
+        if (key === partnerId) setPartnerPresent(true);
         if (presenceReady && key === partnerId) handlersRef.current.onPartnerOnline?.();
+      })
+      .on('presence', { event: 'leave' }, ({ key }) => {
+        if (key === partnerId) setPartnerPresent(false);
       })
       .on('broadcast', { event: 'lamp_update' }, ({ payload }) => {
         handlersRef.current.onLampUpdate?.(payload as LampBroadcastPayload);
@@ -99,6 +115,9 @@ export function useCoupleChannel(
       .on('broadcast', { event: 'needs_update' }, ({ payload }) => {
         handlersRef.current.onNeedsUpdate?.(payload as NeedsBroadcastPayload);
       })
+      .on('broadcast', { event: 'pet_reaction' }, ({ payload }) => {
+        handlersRef.current.onPetReaction?.(payload as PetReactionPayload);
+      })
       .on('broadcast', { event: 'game_signal' }, ({ payload }) => {
         handlersRef.current.onGameSignal?.(payload as GameSignal);
       })
@@ -121,6 +140,7 @@ export function useCoupleChannel(
       clearTimeout(graceTimer);
       supabase.removeChannel(channel);
       channelRef.current = null;
+      setPartnerPresent(false);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, partnerId]);
@@ -157,6 +177,10 @@ export function useCoupleChannel(
     channelRef.current?.send({ type: 'broadcast', event: 'needs_update', payload });
   }, []);
 
+  const sendPetReaction = useCallback((payload: PetReactionPayload) => {
+    channelRef.current?.send({ type: 'broadcast', event: 'pet_reaction', payload });
+  }, []);
+
   const sendGameSignal = useCallback((payload: GameSignal) => {
     channelRef.current?.send({ type: 'broadcast', event: 'game_signal', payload });
   }, []);
@@ -171,6 +195,7 @@ export function useCoupleChannel(
 
   return {
     connected,
+    partnerPresent,
     sendLampUpdate,
     sendPetInteraction,
     sendNoteSent,
@@ -179,6 +204,7 @@ export function useCoupleChannel(
     sendMusicUpdate,
     sendPetPosition,
     sendNeedsUpdate,
+    sendPetReaction,
     sendGameSignal,
     sendPinsChanged,
     sendMusicLibraryChanged,
