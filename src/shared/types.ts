@@ -75,9 +75,25 @@ export interface PetPositionPayload {
   actorId: string;
 }
 
+// A sandbox reaction the cat plays (eat / warm / trap / …). Broadcast by the
+// authority so BOTH partners see the same sprite change + hear the same SFX,
+// not just the client that happens to drive the cat.
+export interface PetReactionPayload {
+  action: string; // CatAction ('eat' | 'warm' | 'inspect' | …)
+  sprite: string | null; // sprite override to show
+  trap: boolean; // true = lock into the pose until the sticker is removed
+  pinId: string | null; // the trapping sticker (for traps)
+  arriveMs: number; // how long a non-trap reaction lasts
+  bubble: string; // status bubble text ("Kitty ate the 🍣")
+  emoji: string; // the sticker emoji (for SFX)
+  actorId: string;
+}
+
 export interface NeedsBroadcastPayload {
   fullness: number;
   happiness: number;
+  energy: number;
+  thirst: number;
   experience: number;
   stage: number;
   updatedAt: string;

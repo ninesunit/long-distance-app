@@ -14,7 +14,7 @@ const IPC = {
   PET_SETTINGS_CHANGED: 'pet:settings-changed',
   GET_PET_SETTINGS: 'pet:get-settings',
   SET_PET_INTERACTIVE: 'pet:set-interactive',
-  SPAWN_TREAT: 'pet:spawn-treat',
+  SPAWN_STICKER: 'pet:spawn-sticker',
 } as const;
 
 let petSettings = { catSize: 64, overlayMode: 'semi' as 'full' | 'semi' | 'none', bottomOffset: -15 };
@@ -53,8 +53,9 @@ export function registerIpcHandlers(): void {
     overlay.setIgnoreMouseEvents(!interactive, { forward: true });
   });
 
-  // Pet popup asks THIS user's overlay to spawn a draggable treat.
-  ipcMain.on(IPC.SPAWN_TREAT, () => {
-    getPetOverlayWindow()?.webContents.send(IPC.SPAWN_TREAT);
+  // Notes popup asks THIS user's overlay to spawn a draggable sticker so the
+  // user can place it exactly where they want on the desktop.
+  ipcMain.on(IPC.SPAWN_STICKER, (_e, payload) => {
+    getPetOverlayWindow()?.webContents.send(IPC.SPAWN_STICKER, payload);
   });
 }

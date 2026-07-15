@@ -44,6 +44,11 @@ module.exports = {
         'music-float': 'musicFloat 1.6s ease-in-out infinite',
         'cat-flip': 'catFlip 0.5s linear infinite',
         'cat-jump': 'catJump 1.5s ease-in-out infinite',
+        'cat-eat': 'catEat 0.4s ease-in-out infinite',
+        'cat-swat': 'catSwat 0.5s ease-in-out infinite',
+        'cat-sneeze': 'catSneeze 0.9s ease-in-out',
+        'cat-nest': 'catNest 1.4s ease-in-out',
+        'residue-fade': 'residueFade 60s linear forwards',
       },
       keyframes: {
         slideIn: {
@@ -107,6 +112,35 @@ module.exports = {
           '45%': { transform: 'translateY(-25vh) rotate(0deg)' },
           '55%': { transform: 'translateY(-25vh) rotate(180deg)' },
           '100%': { transform: 'translateY(0) rotate(180deg)' },
+        },
+        // Head-bob while eating / drinking
+        catEat: {
+          '0%, 100%': { transform: 'translateY(0) scaleY(1)' },
+          '50%': { transform: 'translateY(8%) scaleY(0.94)' },
+        },
+        // Quick paw swipe at a toy
+        catSwat: {
+          '0%, 100%': { transform: 'rotate(0deg)' },
+          '35%': { transform: 'rotate(-10deg) translateX(-6%)' },
+          '70%': { transform: 'rotate(6deg) translateX(4%)' },
+        },
+        // Sniff… then a startled sneeze that knocks the cat back
+        catSneeze: {
+          '0%, 55%': { transform: 'translate(0,0) rotate(0deg)' },
+          '65%': { transform: 'translate(0,3%) rotate(0deg)' },
+          '80%': { transform: 'translate(14%,-6%) rotate(6deg)' },
+          '100%': { transform: 'translate(0,0) rotate(0deg)' },
+        },
+        // Circle a couple of times before settling to nest
+        catNest: {
+          '0%': { transform: 'rotate(0deg) scale(1)' },
+          '60%': { transform: 'rotate(360deg) scale(1)' },
+          '100%': { transform: 'rotate(360deg) scale(0.92)' },
+        },
+        residueFade: {
+          '0%': { opacity: '0.85' },
+          '80%': { opacity: '0.5' },
+          '100%': { opacity: '0' },
         },
       },
     },

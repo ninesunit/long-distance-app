@@ -8,7 +8,7 @@ const isDev = !app.isPackaged;
 export type PopupName = 'pet' | 'note' | 'lamp' | 'settings' | 'game';
 
 const POPUP_SIZE: Record<PopupName, { width: number; height: number }> = {
-  pet: { width: 260, height: 320 },
+  pet: { width: 260, height: 372 },
   note: { width: 280, height: 360 },
   lamp: { width: 260, height: 350 },
   settings: { width: 260, height: 340 },

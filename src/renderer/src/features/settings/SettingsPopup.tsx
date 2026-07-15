@@ -21,6 +21,12 @@ export default function SettingsPopup() {
   const [partnerName, setPartnerName] = useState('');
   const [lampGlow, setLampGlow] = useState(0);
   const lampIntensitiesRef = useRef<Record<string, number>>({});
+  const [update, setUpdate] = useState<{
+    state: 'idle' | 'available' | 'downloading' | 'downloaded' | 'error';
+    version?: string;
+    percent?: number;
+    message?: string;
+  }>({ state: 'idle' });
 
   const { connected, sendStatusChanged } = useCoupleChannel(profile?.id, profile?.partner_id ?? undefined, {
     onStatusChanged: (payload) => setIncomingStatus({ ...payload }),
@@ -43,6 +49,29 @@ export default function SettingsPopup() {
       setBottomOffset(s.bottomOffset ?? 0);
       setOverlayModeState(s.overlayMode ?? 'semi');
     });
+  }, []);
+
+  // Listen for update status + kick off a check whenever Settings is shown.
+  useEffect(() => {
+    const unsub = window.api.onUpdateStatus((s) => {
+      if (s.state === 'none') {
+        setUpdate((u) => (u.state === 'downloaded' ? u : { state: 'idle' }));
+      } else if (s.state === 'available') {
+        setUpdate({ state: 'available', version: s.version });
+      } else if (s.state === 'downloading') {
+        setUpdate({ state: 'downloading', percent: s.percent });
+      } else if (s.state === 'downloaded') {
+        setUpdate({ state: 'downloaded', version: s.version });
+      } else if (s.state === 'error') {
+        setUpdate({ state: 'error', message: s.message });
+      }
+    });
+    window.api.checkForUpdate();
+    const reCheck = window.api.onPopupShown(() => window.api.checkForUpdate());
+    return () => {
+      unsub();
+      reCheck();
+    };
   }, []);
 
   useEffect(() => {
@@ -111,6 +140,48 @@ export default function SettingsPopup() {
             <p className="text-xs text-ink-soft">
               Connected to <span className="font-pixel text-[9px] text-campfire-dark">{partnerName}</span>
             </p>
+          )}
+
+          {/* Update — only visible when there's actually a newer version on GitHub. */}
+          {(update.state === 'available' || update.state === 'downloading' || update.state === 'downloaded') && (
+            <div className="pixel-panel flex flex-col gap-1.5 p-2 border-campfire">
+              {update.state === 'available' && (
+                <>
+                  <p className="font-pixel text-[9px] text-campfire-dark">⬆️ Update available{update.version ? ` (v${update.version})` : ''}</p>
+                  <button
+                    onClick={() => {
+                      window.api.downloadUpdate();
+                      setUpdate({ state: 'downloading', percent: 0 });
+                    }}
+                    className="pixel-btn pixel-btn--primary text-[10px] py-1.5"
+                  >
+                    ⬇️ Download update
+                  </button>
+                </>
+              )}
+              {update.state === 'downloading' && (
+                <>
+                  <p className="font-pixel text-[8px] text-ink-soft">Downloading… {update.percent ?? 0}%</p>
+                  <div className="h-2 border-2 border-ink bg-cozy overflow-hidden">
+                    <div className="h-full bg-campfire transition-all" style={{ width: `${update.percent ?? 0}%` }} />
+                  </div>
+                </>
+              )}
+              {update.state === 'downloaded' && (
+                <>
+                  <p className="font-pixel text-[9px] text-campfire-dark">✅ Update ready{update.version ? ` (v${update.version})` : ''}</p>
+                  <button
+                    onClick={() => window.api.installUpdate()}
+                    className="pixel-btn pixel-btn--primary text-[10px] py-1.5"
+                  >
+                    🔄 Restart &amp; install
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+          {update.state === 'error' && (
+            <p className="text-[10px] text-red-600">Update check failed. Try again later.</p>
           )}
 
           {profile.partner_id && (

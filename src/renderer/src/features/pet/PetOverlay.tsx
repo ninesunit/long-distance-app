@@ -4,22 +4,46 @@ import { useCoupleChannel } from '../realtime/useCoupleChannel';
 import { fetchPetData } from '../../lib/petStore';
 import {
   fetchNeeds,
-  applyInteraction,
+  applyStatDeltas,
   decayNeeds,
   stageColorFilter,
   HUNGRY_THRESHOLD,
   type PetNeeds,
+  type StatDeltas,
 } from '../../lib/needsStore';
 import { playSound, SOUNDS } from '../../lib/sounds';
-import { playMeow, resumeCatAudio, playWhoosh, playThud } from '../../lib/catSounds';
+import {
+  playMeow,
+  resumeCatAudio,
+  playWhoosh,
+  playThud,
+  playCrunch,
+  playSip,
+  playPop,
+  playSplash,
+  playBoing,
+  playSparkle,
+  playSneeze,
+} from '../../lib/catSounds';
 import { supabase } from '../../lib/supabaseClient';
-import { fetchPins, type Pin } from '../../lib/pinsStore';
+import {
+  fetchPins,
+  addPin,
+  removePin,
+  updatePin,
+  pinOpacity,
+  isPinExpired,
+  type Pin,
+  type PinKind,
+} from '../../lib/pinsStore';
+import { sandboxDef, type CatAction } from '../../lib/sandboxCatalog';
 import type {
   PetBroadcastPayload,
   NoteBroadcastPayload,
   PetPositionPayload,
   NeedsBroadcastPayload,
   MusicBroadcastPayload,
+  PetReactionPayload,
 } from '../../../../shared/types';
 
 const CLICK_MOVE_THRESHOLD = 5;
@@ -36,6 +60,78 @@ const FLING_SPEED = 20; // px/frame at release to count as a fling (vs a gentle 
 const AIR_FRICTION = 0.985;
 const WALL_RESTITUTION = 0.55;
 const MAX_FLING_V = 26;
+const SANDBOX_GRAVITY = 0.9; // px/frame² for a dropped sticker
+const SANDBOX_BOUNCE = 0.34; // bounce damping when a sticker hits the ground
+const STICKER_SIZE = 30; // rendered sticker size in px
+
+// SFX for the moment the cat starts reacting to a sticker.
+function playActionSfx(action: CatAction): void {
+  switch (action) {
+    case 'eat':
+      playCrunch();
+      break;
+    case 'drink':
+      playSip();
+      break;
+    case 'warm':
+    case 'nest':
+      playSparkle();
+      break;
+    case 'swat':
+      playBoing();
+      break;
+    case 'hunt':
+      playBoing();
+      playMeow();
+      break;
+    case 'sniff':
+      break; // the sneeze plays on resolve
+    default:
+      playMeow();
+      break;
+  }
+}
+
+// SFX when the cat gets trapped by a chaos toy.
+function playTrapSfx(emoji: string): void {
+  if (emoji === '💦') playSplash();
+  else if (emoji === '🥒') {
+    playBoing();
+    playMeow();
+  } else playPop(); // box
+}
+
+// Verb shown in the little status bubble for each cat reaction.
+function actionVerb(action: CatAction): string {
+  switch (action) {
+    case 'eat':
+      return 'gobbled the';
+    case 'drink':
+      return 'lapped up the';
+    case 'warm':
+      return 'warmed up by the';
+    case 'nest':
+      return 'curled up on the';
+    case 'sniff':
+      return 'sniffed the';
+    case 'swat':
+      return 'batted the';
+    case 'hunt':
+      return 'pounced on the';
+    default:
+      return 'inspected the';
+  }
+}
+
+// A sticker mid-air, dropped from the Pet popup, before it settles into a pin.
+interface FallingSticker {
+  id: string;
+  emoji: string;
+  kind: PinKind;
+  x: number; // px (left)
+  y: number; // px (top)
+  vy: number;
+}
 
 export default function PetOverlay() {
   const { profile } = useAuth();
@@ -68,13 +164,49 @@ export default function PetOverlay() {
   const [pins, setPins] = useState<Pin[]>([]);
   const pinsRef = useRef<Pin[]>([]);
   pinsRef.current = pins;
+  const [pinTick, setPinTick] = useState(0); // forces fade/expiry recompute
+  const handledPinsRef = useRef<Set<string>>(new Set()); // one-shot reactions already done
 
-  const [treatActive, setTreatActive] = useState(false);
-  const [treatPos, setTreatPos] = useState({ x: 0, y: 0 });
-  const treatDraggingRef = useRef(false);
-  const treatModeRef = useRef(false);
-  const treatOffset = useRef({ x: 0, y: 0 });
-  const treatTimeoutRef = useRef<number | null>(null);
+  // Falling "sandbox" stickers: dropped from the Pet popup, they fall to the
+  // ground, then settle into a resting pin the cat pathfinds to. Physics run in
+  // a single rAF loop; rendered from state.
+  const [fallingStickers, setFallingStickers] = useState<FallingSticker[]>([]);
+  const fallingRef = useRef<FallingSticker[]>([]);
+  fallingRef.current = fallingStickers;
+  const sandboxRafRef = useRef<number | null>(null);
+
+  // The bespoke reaction the cat is currently playing (eat/drink/warm/…). While
+  // set, the roam loop holds off and the render shows the matching pose.
+  const [catAction, setCatAction] = useState<CatAction | null>(null);
+  const [actionSprite, setActionSprite] = useState<string | null>(null); // override sprite during a reaction
+  const [trapSprite, setTrapSprite] = useState<string | null>(null); // chaos: cat locked in this pose
+  const [trapPinId, setTrapPinId] = useState<string | null>(null); // the sticker holding the cat
+  const trapRef = useRef(false);
+  const trapPinIdRef = useRef<string | null>(null);
+  trapPinIdRef.current = trapPinId;
+  const trapSeenRef = useRef(false); // confirmed the trapping pin exists (avoids a race-release)
+  const busyRef = useRef(false); // cat mid-interaction → roam waits
+  const swatCountRef = useRef<Record<string, number>>({}); // yarn swats per pin id
+  const anchorXRef = useRef<number | null>(null); // campfire the cat idles near
+  const interactRef = useRef<((pin: Pin) => void) | null>(null); // breaks the roam⇄interact cycle
+  const facingLeftRef = useRef(false);
+
+  // Dragging a resting sticker around the desktop.
+  const [draggingPinId, setDraggingPinId] = useState<string | null>(null);
+  const draggingPinRef = useRef(false);
+  draggingPinRef.current = draggingPinId !== null;
+  const pinDragOffset = useRef({ x: 0, y: 0 });
+  // Stickers fall like the cat: a released sticker drops back to the ground.
+  const pinVelRef = useRef<Map<string, number>>(new Map());
+  const pinFallRafRef = useRef<number | null>(null);
+
+  // Short-lived leftovers (fishbone, etc.) — local visual only, auto-cleared.
+  const [residues, setResidues] = useState<{ id: string; emoji: string; x: number; y: number }[]>([]);
+  const addResidue = useCallback((emoji: string, x: number, y: number) => {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+    setResidues((prev) => [...prev, { id, emoji, x, y }]);
+    window.setTimeout(() => setResidues((prev) => prev.filter((r) => r.id !== id)), 60000);
+  }, []);
 
   const timerRef = useRef<number | null>(null);
   const velocityRef = useRef(0);
@@ -84,6 +216,7 @@ export default function PetOverlay() {
   const flungRef = useRef(false);
   const xRef = useRef(100);
   xRef.current = x;
+  facingLeftRef.current = facingLeft;
   const [flinging, setFlinging] = useState(false);
   const fallRafRef = useRef<number | null>(null);
   const catRef = useRef<HTMLDivElement>(null);
@@ -151,6 +284,8 @@ export default function PetOverlay() {
       if (movingTimerRef.current) clearTimeout(movingTimerRef.current);
       if (groomTimeoutRef.current) clearTimeout(groomTimeoutRef.current);
       if (remoteTimeoutRef.current) clearTimeout(remoteTimeoutRef.current);
+      if (pinFallRafRef.current) cancelAnimationFrame(pinFallRafRef.current);
+      if (sandboxRafRef.current) cancelAnimationFrame(sandboxRafRef.current);
     };
   }, []);
 
@@ -168,7 +303,7 @@ export default function PetOverlay() {
   // rare so a resting cat doesn't look like it's constantly "dancing".
   useEffect(() => {
     const id = window.setInterval(() => {
-      if (asleep || dragging || falling || remoteControlled || moving || grooming || treatModeRef.current) return;
+      if (asleep || dragging || falling || remoteControlled || moving || grooming || busyRef.current) return;
       if (Math.random() < 0.18) {
         setGrooming(true);
         if (groomTimeoutRef.current) clearTimeout(groomTimeoutRef.current);
@@ -184,7 +319,7 @@ export default function PetOverlay() {
     resetIdleTimer();
   }, [resetIdleTimer]);
 
-  const { sendPetInteraction, sendPetPosition, sendNeedsUpdate } = useCoupleChannel(
+  const { sendPetInteraction, sendPetPosition, sendNeedsUpdate, sendPinsChanged, sendPetReaction, partnerPresent } = useCoupleChannel(
     profile?.id,
     profile?.partner_id ?? undefined,
     {
@@ -256,6 +391,8 @@ export default function PetOverlay() {
         setNeeds({
           fullness: payload.fullness,
           happiness: payload.happiness,
+          energy: payload.energy,
+          thirst: payload.thirst,
           experience: payload.experience,
           stage: payload.stage,
           updated_at: payload.updatedAt,
@@ -264,6 +401,34 @@ export default function PetOverlay() {
       onMusicUpdate: (payload: MusicBroadcastPayload) => {
         setListening(payload.isPlaying && !!payload.songId);
       },
+      // Replay the partner-driven cat's reaction so BOTH screens show the same
+      // sprite change + hear the same SFX (not just the authority client).
+      onPetReaction: (payload: PetReactionPayload) => {
+        if (payload.actorId === profile?.id) return;
+        resetIdleTimer(); // any interaction wakes our cat too
+        setHeartEvent(payload.bubble);
+        window.setTimeout(() => setHeartEvent(null), 2600);
+        if (payload.trap) {
+          setCatAction(null);
+          setActionSprite(null);
+          trapSeenRef.current = false;
+          setTrapSprite(payload.sprite);
+          setTrapPinId(payload.pinId);
+          trapRef.current = true;
+          playTrapSfx(payload.emoji);
+        } else {
+          setTrapSprite(null);
+          setTrapPinId(null);
+          trapRef.current = false;
+          setCatAction(payload.action as CatAction);
+          setActionSprite(payload.sprite);
+          playActionSfx(payload.action as CatAction);
+          window.setTimeout(() => {
+            setCatAction(null);
+            setActionSprite(null);
+          }, payload.arriveMs);
+        }
+      },
       onPartnerOnline: () => {
         resetIdleTimer(); // wake the cat to greet
         setHeartEvent(partnerName ? `${partnerName} is here 💕` : 'Welcome home 💕');
@@ -271,11 +436,19 @@ export default function PetOverlay() {
         window.setTimeout(() => setHeartEvent(null), 3500);
       },
       onPinsChanged: () => {
+        // A dropped/removed sticker wakes our cat — so the authority is awake to
+        // go interact with it even if it had fallen asleep.
+        resetIdleTimer();
         if (profile?.partner_id) fetchPins(profile.id, profile.partner_id).then(setPins);
       },
     },
     { trackPresence: true }
   );
+
+  // Who drives the cat: when the partner is offline, WE do (so the cat still
+  // roams + reacts solo). When both are online, the stable leader (smaller UUID)
+  // drives and the other mirrors — avoids two clients fighting over position.
+  const isDriver = !partnerPresent || isAuthority;
 
   useEffect(() => {
     if (!profile?.partner_id) return;
@@ -319,115 +492,348 @@ export default function PetOverlay() {
     return () => clearInterval(id);
   }, []);
 
-  // ---- Drag-a-treat co-op feed ----------------------------------------------
-  const feedFromTreat = useCallback(async () => {
-    if (!profile?.partner_id) return;
-    resetIdleTimer();
-    setHeartEvent(`${profile.display_name} fed ${petName}`);
-    playMeow();
-    window.setTimeout(() => setHeartEvent(null), 2500);
-    sendPetInteraction({ interactionType: 'feed', actorId: profile.id, actorName: profile.display_name });
-    const updated = await applyInteraction(profile.id, profile.partner_id, 'feed');
-    setNeeds(updated);
-    sendNeedsUpdate({
-      fullness: updated.fullness,
-      happiness: updated.happiness,
-      experience: updated.experience,
-      stage: updated.stage,
-      updatedAt: updated.updated_at,
-      actorId: profile.id,
-    });
-  }, [profile, petName, resetIdleTimer, sendPetInteraction, sendNeedsUpdate]);
+  // Coalesce pins_changed while a user spam-drops a scene, so we don't flood the
+  // realtime channel (bursty broadcasts have disconnected both clients before).
+  const pinsBroadcastTimer = useRef<number | null>(null);
+  const queuePinsChanged = useCallback(() => {
+    if (pinsBroadcastTimer.current) return;
+    pinsBroadcastTimer.current = window.setTimeout(() => {
+      pinsBroadcastTimer.current = null;
+      sendPinsChanged();
+    }, 450);
+  }, [sendPinsChanged]);
 
-  const endTreat = useCallback(
-    (dropX: number, dropY: number) => {
-      if (treatTimeoutRef.current) {
-        clearTimeout(treatTimeoutRef.current);
-        treatTimeoutRef.current = null;
+  // ---- Falling "sandbox" stickers -------------------------------------------
+  // A dropped sticker settles into a resting pin. Both partners persist their own
+  // drops; the falling animation is local, the resting pin syncs to the partner.
+  const settleSticker = useCallback(
+    async (s: FallingSticker) => {
+      if (!profile?.partner_id) return;
+      const nx = Math.max(0.02, Math.min(0.98, (s.x + STICKER_SIZE / 2) / window.innerWidth));
+      const ny = Math.max(0.04, Math.min(0.98, (s.y + STICKER_SIZE / 2) / window.innerHeight));
+      const pin = await addPin(profile.id, profile.partner_id, s.emoji, nx, ny, s.kind);
+      if (pin) {
+        setPins((prev) => [...prev, pin]);
+        queuePinsChanged();
       }
-      let fed = false;
-      if (dropX >= 0 && catRef.current) {
-        const r = catRef.current.getBoundingClientRect();
-        fed = dropX >= r.left && dropX <= r.right && dropY >= r.top && dropY <= r.bottom;
-      }
-      treatDraggingRef.current = false;
-      treatModeRef.current = false;
-      setTreatActive(false);
-      interactiveRef.current = false;
-      window.api.setPetInteractive(false);
-      if (fed) feedFromTreat();
     },
-    [feedFromTreat]
+    [profile, queuePinsChanged]
   );
 
+  // Single rAF physics loop for every airborne sticker.
+  const stepSandbox = useCallback(() => {
+    const ground = window.innerHeight - STICKER_SIZE - 6;
+    const stillFalling: FallingSticker[] = [];
+    const justLanded: FallingSticker[] = [];
+    for (const s of fallingRef.current) {
+      const vy = s.vy + SANDBOX_GRAVITY;
+      let y = s.y + vy;
+      if (y >= ground) {
+        y = ground;
+        if (vy > 3.5) stillFalling.push({ ...s, y, vy: -vy * SANDBOX_BOUNCE });
+        else justLanded.push({ ...s, y, vy: 0 });
+      } else {
+        stillFalling.push({ ...s, y, vy });
+      }
+    }
+    fallingRef.current = stillFalling;
+    setFallingStickers(stillFalling);
+    justLanded.forEach(settleSticker);
+    if (stillFalling.length > 0) {
+      sandboxRafRef.current = requestAnimationFrame(stepSandbox);
+    } else {
+      sandboxRafRef.current = null;
+    }
+  }, [settleSticker]);
+
   useEffect(() => {
-    const unsub = window.api.onSpawnTreat(() => {
-      setTreatPos({ x: window.innerWidth / 2 - 18, y: Math.max(60, window.innerHeight / 2) });
-      setTreatActive(true);
-      treatModeRef.current = true;
-      treatDraggingRef.current = false;
-      interactiveRef.current = true;
-      window.api.setPetInteractive(true);
-      if (treatTimeoutRef.current) clearTimeout(treatTimeoutRef.current);
-      // Safety: never leave the whole screen mouse-capturing if the user wanders off.
-      treatTimeoutRef.current = window.setTimeout(() => endTreat(-1, -1), 20000);
+    const unsub = window.api.onSpawnSticker((emoji, kind) => {
+      resetIdleTimer(); // a fresh toy wakes the cat
+      playPop();
+      const s: FallingSticker = {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        emoji,
+        kind: (kind as PinKind) ?? 'chaos',
+        x: window.innerWidth * (0.18 + Math.random() * 0.64) - STICKER_SIZE / 2,
+        y: -STICKER_SIZE,
+        vy: 0,
+      };
+      const next = [...fallingRef.current, s];
+      fallingRef.current = next;
+      setFallingStickers(next);
+      if (sandboxRafRef.current == null) sandboxRafRef.current = requestAnimationFrame(stepSandbox);
     });
     return () => {
       unsub();
-      if (treatTimeoutRef.current) clearTimeout(treatTimeoutRef.current);
+      if (sandboxRafRef.current) cancelAnimationFrame(sandboxRafRef.current);
     };
-  }, [endTreat]);
+  }, [resetIdleTimer, stepSandbox]);
 
-  useEffect(() => {
-    if (!treatActive) return;
-    const move = (e: MouseEvent) => {
-      if (!treatDraggingRef.current) return;
-      setTreatPos({ x: e.clientX - treatOffset.current.x, y: e.clientY - treatOffset.current.y });
-    };
-    const up = (e: MouseEvent) => {
-      if (!treatDraggingRef.current) return;
-      endTreat(e.clientX, e.clientY);
-    };
-    const key = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') endTreat(-1, -1);
-    };
-    window.addEventListener('mousemove', move);
-    window.addEventListener('mouseup', up);
-    window.addEventListener('keydown', key);
-    return () => {
-      window.removeEventListener('mousemove', move);
-      window.removeEventListener('mouseup', up);
-      window.removeEventListener('keydown', key);
-    };
-  }, [treatActive, endTreat]);
-
-  const handleTreatMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      treatDraggingRef.current = true;
-      treatOffset.current = { x: e.clientX - treatPos.x, y: e.clientY - treatPos.y };
+  // ---- Cat interactions (catalog-driven) ------------------------------------
+  const applyDeltas = useCallback(
+    async (deltas: StatDeltas) => {
+      if (!profile?.partner_id || !deltas || Object.keys(deltas).length === 0) return;
+      const updated = await applyStatDeltas(profile.id, profile.partner_id, deltas);
+      setNeeds(updated);
+      sendNeedsUpdate({
+        fullness: updated.fullness,
+        happiness: updated.happiness,
+        energy: updated.energy,
+        thirst: updated.thirst,
+        experience: updated.experience,
+        stage: updated.stage,
+        updatedAt: updated.updated_at,
+        actorId: profile.id,
+      });
     },
-    [treatPos]
+    [profile, sendNeedsUpdate]
   );
 
+  const consumePin = useCallback(
+    async (pin: Pin) => {
+      setPins((prev) => prev.filter((p) => p.id !== pin.id));
+      await removePin(pin.id);
+      sendPinsChanged();
+    },
+    [sendPinsChanged]
+  );
+
+  // Cupcake sugar rush: a few frantic dashes across the screen.
+  const doZoomies = useCallback(() => {
+    busyRef.current = true;
+    setCatAction(null);
+    let n = 0;
+    const dash = () => {
+      if (n >= 3) {
+        busyRef.current = false;
+        return;
+      }
+      n++;
+      const maxX = window.innerWidth - catSize;
+      const nx = n % 2 === 1 ? maxX * 0.9 : maxX * 0.08;
+      const fl = nx < xRef.current;
+      setFacingLeft(fl);
+      setX(nx);
+      if (profile) sendPetPosition({ x: nx, y: groundY, facingLeft: fl, state: 'run', actorId: profile.id });
+      markMoving(RUN_DURATION_MS, 'run');
+      window.setTimeout(dash, RUN_DURATION_MS + 120);
+    };
+    dash();
+  }, [catSize, profile, groundY, sendPetPosition, markMoving]);
+
+  const resolveInteract = useCallback(
+    async (pin: Pin, def: ReturnType<typeof sandboxDef>) => {
+      if (!def) return;
+      if (def.consume) {
+        if (def.residueEmoji) addResidue(def.residueEmoji, pin.x, pin.y);
+        await consumePin(pin);
+        if (def.zoomies) doZoomies();
+        return;
+      }
+      const maxX = window.innerWidth - catSize;
+      switch (def.action) {
+        case 'swat': {
+          const n = (swatCountRef.current[pin.id] ?? 0) + 1;
+          swatCountRef.current[pin.id] = n;
+          // Bat it ~50px away from the direction the cat is facing.
+          const rollDir = facingLeftRef.current ? 1 : -1;
+          const newXpx = Math.max(24, Math.min(window.innerWidth - 24, pin.x * window.innerWidth + rollDir * 50));
+          const newXnorm = newXpx / window.innerWidth;
+          const broken = n >= (def.swatsToBreak ?? 3);
+          const patch = broken ? { x: newXnorm, emoji: def.brokenEmoji ?? pin.emoji } : { x: newXnorm };
+          setPins((prev) => prev.map((p) => (p.id === pin.id ? { ...p, ...patch } : p)));
+          await updatePin(pin.id, patch);
+          sendPinsChanged();
+          if (broken) handledPinsRef.current.add(pin.id);
+          break;
+        }
+        case 'warm': {
+          handledPinsRef.current.add(pin.id);
+          anchorXRef.current = pin.x * window.innerWidth; // idle near the fire now
+          break;
+        }
+        case 'nest': {
+          handledPinsRef.current.add(pin.id);
+          setX(Math.max(0, Math.min(maxX, pin.x * window.innerWidth - catSize / 2)));
+          setAsleep(true); // deep sleep on the pillow
+          break;
+        }
+        case 'sniff': {
+          handledPinsRef.current.add(pin.id);
+          playSneeze();
+          const back = facingLeftRef.current ? 34 : -34; // sneeze knocks it backward
+          setX((prev) => Math.max(0, Math.min(maxX, prev + back)));
+          break;
+        }
+        default:
+          handledPinsRef.current.add(pin.id); // stub / inspect: look once, then ignore
+          break;
+      }
+    },
+    [consumePin, doZoomies, catSize, sendPinsChanged]
+  );
+
+  const interact = useCallback(
+    async (pin: Pin) => {
+      const def = sandboxDef(pin.emoji);
+      if (!def || !profile?.partner_id) return;
+      if (!pinsRef.current.some((p) => p.id === pin.id)) return; // gone already
+      busyRef.current = true;
+      resetIdleTimer();
+      setCatAction(def.action);
+      setActionSprite(def.trap ? null : def.catSprite ?? null); // warming shows its sprite; traps show it on arrival
+      playActionSfx(def.action);
+      const arriveMs = def.arriveMs ?? 1500;
+      const bubble = `${petName} ${actionVerb(def.action)} ${pin.emoji}`;
+      setHeartEvent(bubble);
+      window.setTimeout(() => setHeartEvent(null), 2600);
+      applyDeltas(def.deltas);
+      // Tell the partner to play the same reaction (non-traps replay immediately).
+      if (!def.trap) {
+        sendPetReaction({
+          action: def.action,
+          sprite: def.catSprite ?? null,
+          trap: false,
+          pinId: null,
+          arriveMs,
+          bubble,
+          emoji: pin.emoji,
+          actorId: profile.id,
+        });
+      }
+      window.setTimeout(() => {
+        if (def.trap) {
+          // Lock the cat into the chaos pose. The item is hidden while the cat
+          // wears its sprite, and the cat stays put until the sticker is toggled
+          // off in the app.
+          setCatAction(null);
+          setActionSprite(null);
+          trapSeenRef.current = false;
+          setTrapSprite(def.catSprite ?? null);
+          setTrapPinId(pin.id);
+          trapRef.current = true;
+          playTrapSfx(pin.emoji);
+          sendPetReaction({
+            action: def.action,
+            sprite: def.catSprite ?? null,
+            trap: true,
+            pinId: pin.id,
+            arriveMs: 0,
+            bubble,
+            emoji: pin.emoji,
+            actorId: profile.id,
+          });
+          // busyRef stays true — roam paused until the sticker is removed.
+          return;
+        }
+        resolveInteract(pin, def);
+        if (!def.zoomies) {
+          busyRef.current = false;
+          setCatAction(null);
+          setActionSprite(null);
+        }
+      }, arriveMs);
+    },
+    [profile, petName, resetIdleTimer, applyDeltas, resolveInteract, sendPetReaction]
+  );
+
+  // The cat returns to normal only once its trapping sticker is gone (toggled
+  // off / cleared). Watches the pin list for that sticker disappearing.
+  const releaseTrap = useCallback(() => {
+    trapRef.current = false;
+    setTrapSprite(null);
+    setTrapPinId(null);
+    busyRef.current = false;
+    playMeow();
+    resetIdleTimer();
+  }, [resetIdleTimer]);
+
+  useEffect(() => {
+    if (!trapPinId) return;
+    const present = pins.some((p) => p.id === trapPinId);
+    if (present) trapSeenRef.current = true; // confirmed it exists
+    else if (trapSeenRef.current) releaseTrap(); // …and now it's gone → free the cat
+  }, [pins, trapPinId, releaseTrap]);
+
+  useEffect(() => {
+    interactRef.current = interact;
+  }, [interact]);
+
+  // The next thing worth walking to: eat/catch first, then toys, then cozy spots.
+  const pickInteractable = useCallback((): Pin | null => {
+    const now = Date.now();
+    const usable = pinsRef.current.filter((p) => {
+      if (isPinExpired(p, now)) return false;
+      const def = sandboxDef(p.emoji);
+      if (!def) return false;
+      if (def.consume) return true;
+      if (def.action === 'swat') return (swatCountRef.current[p.id] ?? 0) < (def.swatsToBreak ?? 3);
+      return !handledPinsRef.current.has(p.id); // cozy / stub one-shots
+    });
+    if (usable.length === 0) return null;
+    const prio = (p: Pin) => {
+      const def = sandboxDef(p.emoji)!;
+      if (def.consume) return 0;
+      if (def.action === 'swat') return 1;
+      return 2;
+    };
+    const minPrio = Math.min(...usable.map(prio));
+    const group = usable.filter((p) => prio(p) === minPrio);
+    let best = group[0];
+    let bestDist = Math.abs(best.x * window.innerWidth - xRef.current);
+    for (const p of group) {
+      const d = Math.abs(p.x * window.innerWidth - xRef.current);
+      if (d < bestDist) {
+        best = p;
+        bestDist = d;
+      }
+    }
+    return best;
+  }, []);
+
   const roam = useCallback(() => {
-    if (draggingRef.current || remoteControlledRef.current || falling || asleep || !isAuthority) {
+    if (draggingRef.current || remoteControlledRef.current || falling || asleep || busyRef.current || !isDriver) {
       timerRef.current = window.setTimeout(roam, 1000);
       return;
     }
     const maxX = window.innerWidth - catSize;
-    // Pick a movement style: walk (amble), run (dash), or jump (hop arc).
+
+    // Something to play with / eat? Go to it, then interact on arrival.
+    const target = pickInteractable();
+    if (target) {
+      const def = sandboxDef(target.emoji);
+      const targetX = Math.max(0, Math.min(maxX, target.x * window.innerWidth - catSize / 2));
+      const dist = Math.abs(targetX - xRef.current);
+      const useJump = def?.action === 'hunt' || dist > maxX * 0.3;
+      const mode: 'walk' | 'jump' = useJump ? 'jump' : 'walk';
+      const wireState = useJump ? 'jump' : 'roam';
+      const durationMs = useJump ? JUMP_DURATION_MS : WALK_DURATION_MS;
+      const nextFacingLeft = targetX < xRef.current;
+      setFacingLeft(nextFacingLeft);
+      setX(targetX);
+      if (profile) {
+        sendPetPosition({ x: targetX, y: groundY, facingLeft: nextFacingLeft, state: wireState, actorId: profile.id });
+      }
+      markMoving(durationMs, mode);
+      timerRef.current = window.setTimeout(() => {
+        interactRef.current?.(target);
+        const wait = (def?.arriveMs ?? 1500) + 1600 + Math.random() * 1200;
+        timerRef.current = window.setTimeout(roam, wait);
+      }, durationMs);
+      return;
+    }
+
+    // Otherwise amble around (walk / run / jump), biased toward a campfire anchor.
     const r = Math.random();
     const mode: 'walk' | 'run' | 'jump' = r < 0.3 ? 'run' : r < 0.6 ? 'jump' : 'walk';
     const fast = mode === 'run' || mode === 'jump';
-    const visitPin = !fast && pinsRef.current.length > 0 && Math.random() < 0.35;
-    const wireState = mode === 'walk' ? 'roam' : mode; // 'roam' | 'run' | 'jump'
+    const wireState = mode === 'walk' ? 'roam' : mode;
     const durationMs = mode === 'run' ? RUN_DURATION_MS : mode === 'jump' ? JUMP_DURATION_MS : WALK_DURATION_MS;
 
     setX((prev) => {
       let nextX: number;
-      if (visitPin) {
-        const pin = pinsRef.current[Math.floor(Math.random() * pinsRef.current.length)];
-        nextX = Math.max(0, Math.min(maxX, pin.x * window.innerWidth - catSize / 2));
+      if (!fast && anchorXRef.current != null && Math.random() < 0.5) {
+        nextX = Math.max(0, Math.min(maxX, anchorXRef.current - catSize / 2 + (Math.random() - 0.5) * 130));
       } else if (fast) {
         nextX = Math.random() * maxX;
       } else {
@@ -441,10 +847,9 @@ export default function PetOverlay() {
       return nextX;
     });
     markMoving(durationMs, mode);
-    // Move, then sit/groom a while before the next outing.
     const pauseMs = fast ? 800 + Math.random() * 1500 : 1500 + Math.random() * 2500;
     timerRef.current = window.setTimeout(roam, durationMs + pauseMs);
-  }, [falling, catSize, asleep, isAuthority, profile, groundY, sendPetPosition, markMoving]);
+  }, [falling, catSize, asleep, isDriver, profile, groundY, sendPetPosition, markMoving, pickInteractable]);
 
   useEffect(() => {
     timerRef.current = window.setTimeout(roam, 2000);
@@ -462,6 +867,20 @@ export default function PetOverlay() {
     return () => window.removeEventListener('mousemove', handleMove);
   }, []);
 
+  // Age stickers: re-render so ephemeral ones fade, and drop any that have
+  // fully expired so the wall stays tidy on both screens.
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const now = Date.now();
+      setPins((prev) => {
+        const alive = prev.filter((p) => !isPinExpired(p, now));
+        return alive.length === prev.length ? prev : alive;
+      });
+      setPinTick((t) => t + 1);
+    }, 20000);
+    return () => clearInterval(id);
+  }, []);
+
   // Only check hover + toggle interactivity on a slow fixed interval,
   // decoupled from mousemove event frequency. This keeps setIgnoreMouseEvents
   // calls capped at 2/sec regardless of how much the mouse actually moves —
@@ -469,24 +888,35 @@ export default function PetOverlay() {
   // other apps (e.g. YouTube/Discord freezing during interaction).
   useEffect(() => {
     const interval = setInterval(() => {
-      if (treatModeRef.current) return; // treat mode owns interactivity
-      if (draggingRef.current || remoteControlledRef.current) return;
+      if (draggingRef.current || remoteControlledRef.current || draggingPinRef.current) return;
       if (!catRef.current) return;
       const rect = catRef.current.getBoundingClientRect();
       const { x: mx, y: my } = mousePosRef.current;
-      const over = mx >= rect.left && mx <= rect.right && my >= rect.top && my <= rect.bottom;
+      let over = mx >= rect.left && mx <= rect.right && my >= rect.top && my <= rect.bottom;
+      // Also interactive when hovering a resting sticker, so it can be dragged.
+      if (!over && mx >= 0) {
+        const r = STICKER_SIZE / 2 + 4;
+        over = pinsRef.current.some((p) => {
+          const cx = p.x * window.innerWidth;
+          const cy = p.y * window.innerHeight;
+          return mx >= cx - r && mx <= cx + r && my >= cy - r && my <= cy + r;
+        });
+      }
       if (over !== interactiveRef.current) {
         interactiveRef.current = over;
         window.api.setPetInteractive(over);
       }
-    }, 500);
+    }, 400);
     return () => clearInterval(interval);
   }, []);
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      if (!catRef.current || remoteControlledRef.current || treatModeRef.current) return;
+      if (!catRef.current || remoteControlledRef.current) return;
       resumeCatAudio(); // unlock synth audio on this user gesture
+      // A trapped cat can still be picked up & thrown (it keeps its trap sprite);
+      // a cat mid-quick-reaction is left alone.
+      if (busyRef.current && !trapRef.current) return;
       resetIdleTimer();
 
       const rect = catRef.current.getBoundingClientRect();
@@ -509,6 +939,77 @@ export default function PetOverlay() {
     },
     [resetIdleTimer]
   );
+
+  // ---- Drag a resting sticker around the desktop ----------------------------
+  const handlePinMouseDown = useCallback((e: React.MouseEvent, pin: Pin) => {
+    e.stopPropagation();
+    e.preventDefault();
+    pinVelRef.current.delete(pin.id); // stop any in-progress fall
+    pinDragOffset.current = { x: e.clientX - pin.x * window.innerWidth, y: e.clientY - pin.y * window.innerHeight };
+    setDraggingPinId(pin.id);
+  }, []);
+
+  // Gravity for released stickers — they drop back to the ground and bounce,
+  // just like the cat. One rAF loop advances every falling sticker.
+  const stepPinFall = useCallback(() => {
+    // Drop velocities for stickers that vanished mid-fall (eaten / cleared).
+    for (const id of pinVelRef.current.keys()) {
+      if (!pinsRef.current.some((p) => p.id === id)) pinVelRef.current.delete(id);
+    }
+    const groundCenterY = window.innerHeight - STICKER_SIZE / 2 - 6;
+    const settled: { id: string; x: number; y: number }[] = [];
+    const next = pinsRef.current.map((p) => {
+      const vel = pinVelRef.current.get(p.id);
+      if (vel === undefined) return p;
+      const vy = vel + SANDBOX_GRAVITY;
+      let cy = p.y * window.innerHeight + vy;
+      if (cy >= groundCenterY) {
+        cy = groundCenterY;
+        if (vy > 3.5) pinVelRef.current.set(p.id, -vy * SANDBOX_BOUNCE);
+        else {
+          pinVelRef.current.delete(p.id);
+          settled.push({ id: p.id, x: p.x, y: cy / window.innerHeight });
+        }
+      } else {
+        pinVelRef.current.set(p.id, vy);
+      }
+      return { ...p, y: cy / window.innerHeight };
+    });
+    pinsRef.current = next;
+    setPins(next);
+    if (settled.length > 0) {
+      settled.forEach((s) => updatePin(s.id, { x: s.x, y: s.y }));
+      queuePinsChanged();
+    }
+    if (pinVelRef.current.size > 0) pinFallRafRef.current = requestAnimationFrame(stepPinFall);
+    else pinFallRafRef.current = null;
+  }, [queuePinsChanged]);
+
+  useEffect(() => {
+    if (!draggingPinId) return;
+    interactiveRef.current = true;
+    window.api.setPetInteractive(true);
+    const move = (e: MouseEvent) => {
+      const nx = Math.max(0.02, Math.min(0.98, (e.clientX - pinDragOffset.current.x) / window.innerWidth));
+      const ny = Math.max(0.02, Math.min(0.98, (e.clientY - pinDragOffset.current.y) / window.innerHeight));
+      setPins((prev) => prev.map((p) => (p.id === draggingPinId ? { ...p, x: nx, y: ny } : p)));
+    };
+    const up = () => {
+      const id = draggingPinId;
+      setDraggingPinId(null);
+      interactiveRef.current = false;
+      window.api.setPetInteractive(false);
+      // Let it fall back to the ground instead of hanging where dropped.
+      pinVelRef.current.set(id, 0);
+      if (pinFallRafRef.current == null) pinFallRafRef.current = requestAnimationFrame(stepPinFall);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+    return () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    };
+  }, [draggingPinId, stepPinFall]);
 
   useEffect(() => {
     if (!dragging) return;
@@ -543,7 +1044,7 @@ export default function PetOverlay() {
       draggingRef.current = false;
       setDragging(false);
 
-      if (!hasMoved.current && profile) {
+      if (!hasMoved.current && profile && !trapRef.current) {
         setHeartEvent(`${profile.display_name} petted ${petName}`);
         playMeow();
         window.setTimeout(() => setHeartEvent(null), 2500);
@@ -671,7 +1172,10 @@ export default function PetOverlay() {
   const isPositionedAbsolute = dragging || falling || remoteControlled;
   const moveDurationMs = moveMode === 'run' ? RUN_DURATION_MS : moveMode === 'jump' ? JUMP_DURATION_MS : WALK_DURATION_MS;
 
-  const motion = asleep
+  // `trap` = locked in a chaos pose (box/wet/startled). `action` = mid-reaction.
+  const motion = trapSprite
+    ? 'trap'
+    : asleep
     ? 'sleep'
     : dragging
     ? 'drag'
@@ -679,14 +1183,39 @@ export default function PetOverlay() {
     ? 'fall'
     : remoteControlled && remoteState
     ? remoteState // partner is dragging/flinging → show it, not idle
+    : catAction
+    ? 'action'
     : moving
     ? moveMode // 'walk' | 'run' | 'jump'
     : grooming
     ? 'groom'
     : 'sit';
 
+  // Reaction sprite: warming/etc. can override; a leap uses the jumping pose.
+  const actionSrc = actionSprite ?? (catAction === 'hunt' ? './sprites/pixel_cat_jumping.png' : './sprites/pixel_cat_sit.png');
+  const actionAnim =
+    catAction === 'eat'
+      ? 'animate-cat-eat'
+      : catAction === 'drink'
+      ? 'animate-cat-eat'
+      : catAction === 'warm'
+      ? 'animate-cat-groom'
+      : catAction === 'nest'
+      ? 'animate-cat-nest'
+      : catAction === 'sniff'
+      ? 'animate-cat-sneeze'
+      : catAction === 'swat'
+      ? 'animate-cat-swat'
+      : catAction === 'hunt'
+      ? 'animate-cat-jump'
+      : ''; // inspect — just sit and look
+
   const catSrc =
-    motion === 'sleep'
+    motion === 'trap'
+      ? trapSprite!
+      : motion === 'action'
+      ? actionSrc
+      : motion === 'sleep'
       ? './sprites/pixel_cat_sleeping.gif'
       : motion === 'drag'
       ? './sprites/pixel_cat_drag.png' // being carried
@@ -699,8 +1228,12 @@ export default function PetOverlay() {
       : './sprites/pixel_cat_jumping.png'; // fall / fling — airborne pose
 
   const catAnim =
-    flinging || motion === 'fling'
+    motion === 'trap'
+      ? 'animate-cat-breathe' // gentle idle while stuck (even when picked up)
+      : flinging || motion === 'fling'
       ? 'animate-cat-flip' // spinning while flung (local or mirrored from partner)
+      : motion === 'action'
+      ? actionAnim
       : motion === 'walk'
       ? 'animate-cat-step'
       : motion === 'run'
@@ -722,34 +1255,68 @@ export default function PetOverlay() {
 
   return (
     <div className="w-full h-full relative overflow-hidden">
-      {treatActive && (
-        <>
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 font-pixel text-[10px] text-ink bg-white border-2 border-ink px-2 py-1 whitespace-nowrap pointer-events-none">
-            Drag the treat to {petName}! · Esc to cancel
-          </div>
-          <div
-            className="absolute z-50 cursor-grab active:cursor-grabbing select-none"
-            style={{ left: treatPos.x, top: treatPos.y, fontSize: 32, lineHeight: 1 }}
-            onMouseDown={handleTreatMouseDown}
-            onContextMenu={(e) => e.preventDefault()}
-          >
-            🍖
-          </div>
-        </>
-      )}
-      {pins.map((p) => (
+      {/* Faded leftovers (fishbone, etc.) — local visual only. */}
+      {residues.map((r) => (
         <div
-          key={p.id}
-          className="absolute pointer-events-none select-none"
+          key={r.id}
+          className="absolute pointer-events-none select-none animate-residue-fade"
           style={{
-            left: p.x * window.innerWidth,
-            top: p.y * window.innerHeight,
+            left: r.x * window.innerWidth,
+            top: r.y * window.innerHeight,
             transform: 'translate(-50%, -50%)',
-            fontSize: 26,
-            filter: 'drop-shadow(1px 2px 1px rgba(0,0,0,0.35))',
+            fontSize: 22,
+            filter: 'grayscale(0.3) drop-shadow(1px 2px 1px rgba(0,0,0,0.3))',
           }}
         >
-          {p.emoji}
+          {r.emoji}
+        </div>
+      ))}
+
+      {/* Resting sandbox stickers the cat pathfinds to — draggable. Butterflies hover. */}
+      {pins.map((p) => {
+        void pinTick; // referenced so the fade interval's re-render recomputes opacity
+        if (p.id === trapPinId) return null; // hidden while the cat wears its sprite
+        const op = pinOpacity(p);
+        const isDragging = draggingPinId === p.id;
+        const floats = sandboxDef(p.emoji)?.floats && !isDragging;
+        return (
+          <div
+            key={p.id}
+            className={`absolute select-none cursor-grab active:cursor-grabbing ${floats ? 'animate-music-float' : ''}`}
+            style={{
+              left: p.x * window.innerWidth,
+              top: p.y * window.innerHeight,
+              transform: 'translate(-50%, -50%)',
+              fontSize: 26,
+              opacity: op,
+              filter: 'drop-shadow(1px 2px 1px rgba(0,0,0,0.35))',
+              zIndex: isDragging ? 40 : undefined,
+            }}
+            title="Drag me anywhere"
+            onMouseDown={(e) => handlePinMouseDown(e, p)}
+            onContextMenu={(e) => e.preventDefault()}
+          >
+            {p.emoji}
+          </div>
+        );
+      })}
+
+      {/* Airborne stickers mid-drop. */}
+      {fallingStickers.map((s) => (
+        <div
+          key={s.id}
+          className="absolute pointer-events-none select-none"
+          style={{
+            left: s.x,
+            top: s.y,
+            width: STICKER_SIZE,
+            height: STICKER_SIZE,
+            fontSize: STICKER_SIZE - 4,
+            lineHeight: 1,
+            filter: 'drop-shadow(1px 2px 2px rgba(0,0,0,0.35))',
+          }}
+        >
+          {s.emoji}
         </div>
       ))}
 
